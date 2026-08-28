@@ -1,0 +1,26 @@
+{
+  "name": "taskweb-plugin",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "wxt",
+    "compile": "tsc --noEmit -p .",
+    "build": "npm run compile && wxt build",
+    "zip": "wxt zip",
+    "postinstall": "wxt prepare"
+  },
+  "dependencies": {
+    "lucide-react": "latest",
+    "react": "latest",
+    "react-dom": "latest"
+  },
+  "devDependencies": {
+    "@types/chrome": "^0.2.7",
+    "@types/react": "latest",
+    "@types/react-dom": "latest",
+    "@wxt-dev/module-react": "latest",
+    "typescript": "latest",
+    "wxt": "latest"
+  }
+}
