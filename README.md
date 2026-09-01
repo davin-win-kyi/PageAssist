@@ -1,48 +1,90 @@
 # TaskWeb Studio
 
-TaskWeb is a prototype for authoring webpage interfaces through three linked representations:
+TaskWeb is a prototype for **authoring webpage interface support through chat**. You describe a
+difficulty you have with a page; TaskWeb helps you shape a reusable support concept, then realizes it
+as a small widget grounded in that page's real elements — a live checklist, a progress tracker, a
+"what's left" panel, whatever you and the assistant land on.
 
-- **Task representation** — grounded in one specific webpage's real DOM (`task_id`/`task_name`/`children_tasks`/`task_elements`). Rebuilt per site from its actual elements; never fabricated.
-- **Interface representation** — a single, webpage-agnostic set of preferences (`component`/`component_preferences`/`children`), shaped entirely through chat against a generic preview, independent of any specific site.
-- **Webpage interface** — the concrete interface actually injected into a given site, produced by combining that site's task representation with the interface representation.
+It has two parts, each with its own README:
 
-The side panel (built with WXT/React) chats with the user to shape the interface representation, and separately analyzes whatever page is open to build its task representation; the FastAPI service combines the two via Claude to generate each site's concrete webpage interface, which a content script renders as a floating overlay on the real page.
+| Part | Stack | README |
+|---|---|---|
+| `plugin/` | Chrome extension — WXT + React (side panel, content script, sandboxed widget) | [plugin/README.md](plugin/README.md) |
+| `backend/` | FastAPI + Claude, split into `common` / `task` / `interface` packages | [backend/README.md](backend/README.md) |
 
-## Run it
+## The three representations
 
-### Plugin
+Everything in the system is one of three linked representations:
 
-The plugin is built with [WXT](https://wxt.dev) (Vite + React under the hood).
+- **Task representation** — a semantic model of what the user is trying to do on **one specific
+  webpage**, grounded strictly in that page's real, visible elements. Shape:
+  `{task_id, task_name, children_tasks[], task_elements[], example_difficulties[]}`, recursive, with
+  each `task_elements` entry copied verbatim from the DOM (`selector`, `tag`, `text`, `role`,
+  `accessibleName`, `visible`). Rebuilt per page; never fabricated.
 
-```sh
-cd plugin
-npm install
-npm run dev
+- **Interface representation** — a single, **webpage-agnostic** set of support preferences, shaped
+  entirely through chat against a generic preview. Shape: `{component, style, content, children[]}`
+  where `style` is real CSS, `content` is short intent phrases (never literal page text), and
+  `children` are structural groupings generic to the *kind* of task. One is "active" at a time; any
+  can be saved to a reusable database and re-activated on a different site later.
+
+- **Webpage interface** — the concrete widget for one site: its task representation realized through
+  the active interface representation. Model-generated JavaScript that runs in a sandboxed iframe,
+  plus a small host-managed `style` (frame position/size) and `state.items` (the real elements it
+  tracks).
+
+## How it fits together
+
+```
+        ┌─────────────── side panel (React) ───────────────┐
+        │  chat  ──────────────►  interface representation  │   (webpage-agnostic, reusable)
+        │  page open  ────────►  task representation        │   (this page, grounded)
+        └───────────────────────────┬──────────────────────┘
+                                    │  activate / agree
+                                    ▼
+                    backend combines the two via Claude
+                                    │
+                                    ▼
+                          webpage interface (JS)
+                                    │  chrome.tabs.sendMessage
+                                    ▼
+        content script hosts it in a sandboxed iframe on the real page;
+        refreshes its live "complete" state on every keystroke, no model call
 ```
 
-`npm run dev` launches a dedicated Chrome instance with the extension already loaded and hot-reloading across the side panel, content script, and background worker — no manual "load unpacked" step needed while iterating.
+- The **content script** reads the page (for analysis), watches it for change, and hosts the widget
+  iframe. It draws **no chrome** — the widget authors its own title bar / drag handle / close button
+  and asks the host to act via a tiny `window.taskweb` API.
+- The widget is only shown after the user **explicitly** activates a saved interface or agrees to one
+  in chat. Page changes regenerate the stored widget silently but never pop it onto the page.
+- Live completion state (a checklist ticking off as you fill fields) is read straight from the DOM by
+  the content script — the model never computes or represents it.
 
-For a one-off production build, run `npm run build` inside `plugin`; it outputs to `plugin/.output/chrome-mv3/`. To load that build manually (e.g. in Edge, or a Chrome profile you're not running `dev` in), open the browser's extensions page, enable Developer mode, and choose `plugin/.output/chrome-mv3` as an unpacked extension. Click the extension's toolbar icon to open the chat as a side panel. The plugin injects a content script into webpages and exposes the `taskweb:inspect` and `taskweb:apply-interface` page events.
+## Design commitments
 
-### Backend
+- **User authorship, not a fixed toolkit.** The widget is generated code, not a template. There is no
+  predefined component library and no host-drawn UI furniture — anything the user sees, the model
+  authored, within the sandbox.
+- **Grounded, never fabricated.** Task elements and widget items are copied verbatim from the real
+  DOM. The model is told to flatten or show less rather than guess missing structure.
+- **Cost control.** Passive page-change events are gated by a structural-change heuristic, an
+  agreement check, and a hard per-window cooldown before they can trigger a paid regeneration.
+- **Isolation.** Model-generated code runs only in an `allow-scripts` (opaque-origin) iframe with
+  `fetch`/`XHR`/`WebSocket`/`window.open` stripped — structurally unable to touch the real page.
+
+## Getting started
+
+See the per-part READMEs for full instructions. In short:
 
 ```sh
-cd backend
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-uvicorn main:app --reload --port 8000
+# backend
+cd backend && python3 -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt && uvicorn main:app --reload --port 8000
+
+# plugin (separate terminal)
+cd plugin && npm install && npm run dev
 ```
 
-The backend exposes:
-- `GET /health`
-- `POST /task-representations/{site_id}/analyze`, `GET /task-representations/{site_id}` — per-site, built from real page elements
-- `GET /interface-representation`, `POST /interface-representation/reset` — the currently *active* preferences object (what `/chat` edits)
-- `GET /interface-representations` — lists every saved, reusable interface representation
-- `POST /interface-representations` — saves the active one as a new named, reusable entry
-- `POST /interface-representations/{id}/activate` — makes a previously saved one active again, e.g. to reuse it on a different site
-- `POST /chat` — conversational, updates only the active interface representation
-- `POST /webpage-interfaces/{site_id}/generate`, `GET /webpage-interfaces/{site_id}` — combines a site's task representation with the active interface representation into that site's concrete interface
-- `POST /task-representations/{site_id}/events/process` — checks whether a detected page change is task-relevant, and if so regenerates that site's webpage interface
-
-Task representations (and each site's generated webpage interface) are persisted to `backend/task_representations.json`; the interface representation database lives in `backend/interface_representations.json`. Both are created fresh on first run. Set `VITE_API_URL` when the API is not running at `http://localhost:8000`. Model credentials are read from `ANTHROPIC_API_KEY`/`ANTHROPIC_MODEL` env vars; without them, each endpoint falls back to a deterministic non-AI response so the app still runs.
+`npm run dev` opens a Chrome instance with the extension loaded; click its toolbar icon for the side
+panel. Without `ANTHROPIC_API_KEY` / `ANTHROPIC_MODEL` set in `backend/.env`, every endpoint falls
+back to a deterministic non-AI response so the app still runs.

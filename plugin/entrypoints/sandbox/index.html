@@ -1,0 +1,18 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>TaskWeb widget sandbox</title>
+    <style>
+      /* No height:100% here on purpose — the host measures document.body.scrollHeight to auto-size the
+         iframe to the widget's actual content, which only works if body's height reflects its content's
+         natural size rather than stretching to fill whatever height the iframe currently happens to have
+         (that would just report the iframe's own current size back, self-reinforcing). */
+      html, body { margin: 0; padding: 0; }
+      body { font: 13px -apple-system, BlinkMacSystemFont, sans-serif; }
+    </style>
+  </head>
+  <body>
+    <script type="module" src="./main.ts"></script>
+  </body>
+</html>

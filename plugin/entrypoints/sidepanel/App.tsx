@@ -3,18 +3,32 @@ import { RefreshCw, Send, Sparkles } from 'lucide-react'
 
 type InterfaceNode = {
   component: string
-  component_preferences: Record<string, unknown>
+  style: Record<string, string>
+  // A list of phrases describing intent on the reusable, webpage-agnostic preference tree; an object of
+  // literal display text once grounded to a specific page's webpage_interface.
+  content: Record<string, string> | string[]
+  // Grounds a node in a real page element for the model's own reference; the renderer never displays
+  // this as text (unlike content, which is shown verbatim).
+  selector?: string
   children: InterfaceNode[]
 }
 type InterfaceRepresentationResponse = { tree: InterfaceNode; agreed: boolean }
-type TaskElement = { id: string; selector: string; tag: string; text: string }
+// The concrete, page-grounded result of combining preferences + a task representation — model-generated
+// CODE now, not a declarative tree the panel/content script interpret. "style" is host-applied position/
+// size for the outer frame only; "code" runs inside the sandboxed widget iframe (see entrypoints/sandbox);
+// "state" is what that code's render(state) receives, and what the content script keeps live afterward.
+type WidgetItem = { selector: string; label?: string; complete?: boolean }
+type WidgetState = { items?: WidgetItem[]; [key: string]: unknown }
+type Widget = { style: Record<string, string>; code: string; state: WidgetState }
+type TaskElement = { id: string; selector: string; tag: string; text: string; role?: string; accessibleName?: string; visible?: boolean }
 type TaskNode = {
   task_id: string
   task_name: string
   children_tasks: TaskNode[]
   task_elements: TaskElement[]
+  example_difficulties?: string[]
 }
-type ChatEntry = { id: string; role: 'user' | 'assistant'; text: string; suggestions?: string[] }
+type ChatEntry = { id: string; role: 'user' | 'assistant'; text: string; suggestions?: string[]; chooseInterface?: SavedInterface[] }
 type ChatResponse = {
   reply: string
   suggestions: string[]
@@ -27,8 +41,10 @@ const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000'
 type RuntimeMessage = { type?: string; event?: { type: string; url: string; target?: Record<string, unknown>; payload?: Record<string, unknown> } }
 type PageElementsResponse = { url: string; title: string; elements: TaskElement[] }
 type TabInfo = { id?: number; active?: boolean }
-type TabUpdatedListener = (tabId: number, changeInfo: { status?: string }, tab: TabInfo) => void
+type TabUpdatedListener = (tabId: number, changeInfo: { status?: string; url?: string }, tab: TabInfo) => void
 type TabActivatedListener = (activeInfo: { tabId: number }) => void
+type WebNavDetails = { tabId: number; frameId: number; url: string }
+type WebNavListener = (details: WebNavDetails) => void
 type ExtensionChrome = {
   tabs?: {
     query: (options: object, callback: (tabs: TabInfo[]) => void) => void
@@ -40,12 +56,34 @@ type ExtensionChrome = {
     onMessage?: { addListener: (listener: (message: RuntimeMessage) => void) => void; removeListener: (listener: (message: RuntimeMessage) => void) => void }
     lastError?: { message?: string }
   }
+  webNavigation?: {
+    // Fires for single-page apps that change the URL via history.pushState/replaceState — a normal
+    // full navigation does NOT trigger this (that's tabs.onUpdated's job instead).
+    onHistoryStateUpdated?: { addListener: (listener: WebNavListener) => void; removeListener: (listener: WebNavListener) => void }
+  }
+  storage?: {
+    local?: {
+      get: (keys: string | string[] | null, callback: (items: Record<string, unknown>) => void) => void
+      set: (items: object, callback?: () => void) => void
+    }
+  }
 }
 const extensionChrome = (globalThis as typeof globalThis & { chrome?: ExtensionChrome }).chrome
 
+// Quick-reply chips are never hardcoded — they come from the task representation's model-generated
+// example_difficulties, so they're grounded in the actual page. Until analysis lands there are none.
 const INTRO = {
   text: 'I can help create interface support for this webpage. Describe something that’s difficult about the current task, or describe a support you already have in mind — I may ask you to confirm how I’ve understood it.',
-  suggestions: ['I keep losing track of which steps are done', 'I can’t tell what’s still required'],
+}
+
+// The Anthropic-backed endpoints (analyze/generate/chat) have shown real latency variance in this
+// project already, and had NO timeout at all — a slow or hung call left the panel stuck on its loading
+// screen indefinitely, with no visible error, since nothing downstream ever ran to clear it.
+const LLM_CALL_TIMEOUT_MS = 25000
+function fetchWithTimeout(url: string, options: RequestInit = {}, timeoutMs = LLM_CALL_TIMEOUT_MS): Promise<Response> {
+  const controller = new AbortController()
+  const timeout = window.setTimeout(() => controller.abort(), timeoutMs)
+  return fetch(url, { ...options, signal: controller.signal }).finally(() => window.clearTimeout(timeout))
 }
 
 function requestPageElements(): Promise<PageElementsResponse | undefined> {
@@ -65,7 +103,7 @@ function requestPageElements(): Promise<PageElementsResponse | undefined> {
 }
 
 function hasPreferences(rep: InterfaceNode | undefined): boolean {
-  return !!rep && (rep.children.length > 0 || Object.keys(rep.component_preferences).length > 0)
+  return !!rep && (rep.children.length > 0 || Object.keys(rep.style).length > 0 || Object.keys(rep.content).length > 0)
 }
 
 function App() {
@@ -76,7 +114,7 @@ function App() {
   const [isThinking, setIsThinking] = useState(false)
   const [synced, setSynced] = useState(true)
   const [agreed, setAgreed] = useState(false)
-  const [transcript, setTranscript] = useState<ChatEntry[]>([{ id: 'intro', role: 'assistant', text: INTRO.text, suggestions: INTRO.suggestions }])
+  const [transcript, setTranscript] = useState<ChatEntry[]>([{ id: 'intro', role: 'assistant', text: INTRO.text }])
   const [ready, setReady] = useState(false)
   const [activeTab, setActiveTab] = useState<'chat' | 'saved'>('chat')
   const [savedRepresentations, setSavedRepresentations] = useState<SavedInterface[]>([])
@@ -88,100 +126,165 @@ function App() {
   const siteIdRef = useRef('')
   const agreedRef = useRef(false)
 
+  // use effect when the agreed state changes 
   useEffect(() => { agreedRef.current = agreed }, [agreed])
 
-  const pushWebpageInterface = (tree: InterfaceNode | null) => {
+  // The content script can take a variable amount of time to finish injecting/registering its
+  // listener right after a page loads — confirmed live that a single 500ms retry still isn't always
+  // enough. Retries with backoff a few times before actually giving up.
+  const RETRY_DELAYS_MS = [400, 900, 1600]
+  const pushWebpageInterface = (widget: Widget | null, attempt = 0) => {
     extensionChrome?.tabs?.query({ active: true, currentWindow: true }, tabs => {
       const tabId = tabs[0]?.id
       if (tabId === undefined) return
-      extensionChrome.tabs?.sendMessage(tabId, { type: 'APPLY_WEBPAGE_INTERFACE', tree }, () => {
+      extensionChrome.tabs?.sendMessage(tabId, { type: 'APPLY_WEBPAGE_INTERFACE', tree: widget }, () => {
         const lastError = extensionChrome.runtime?.lastError
-        if (lastError) console.error('Unable to apply the webpage interface — the content script may not be loaded on this tab (try reloading it):', lastError.message)
+        if (!lastError) return
+        if (attempt < RETRY_DELAYS_MS.length) {
+          window.setTimeout(() => pushWebpageInterface(widget, attempt + 1), RETRY_DELAYS_MS[attempt])
+        } else {
+          console.error(`Unable to apply the webpage interface after ${RETRY_DELAYS_MS.length} retries — the content script may not be loaded on this tab (try reloading it):`, lastError.message)
+        }
       })
     })
   }
 
   const generateWebpageInterface = async (id: string) => {
     try {
-      const response = await fetch(`${API_URL}/webpage-interfaces/${encodeURIComponent(id)}/generate`, { method: 'POST' })
+      const response = await fetchWithTimeout(`${API_URL}/webpage-interfaces/${encodeURIComponent(id)}/generate`, { method: 'POST' })
       if (!response.ok) throw new Error(`Generate failed: ${response.status}`)
-      const tree: InterfaceNode = await response.json()
-      pushWebpageInterface(tree)
+      const widget: Widget = await response.json()
+      pushWebpageInterface(widget)
     } catch (error) {
       console.error('Unable to generate webpage interface', error)
     }
   }
 
-  const refreshSavedList = async () => {
+  const refreshSavedList = async (): Promise<SavedInterface[]> => {
     try {
       const response = await fetch(`${API_URL}/interface-representations`)
       if (!response.ok) throw new Error(`List failed: ${response.status}`)
-      setSavedRepresentations(await response.json())
+      const items: SavedInterface[] = await response.json()
+      setSavedRepresentations(items)
+      return items
     } catch (error) {
       console.error('Unable to load saved interface representations', error)
+      return []
     }
   }
 
   // Grabs the current active tab's page elements, and — only if it's a genuinely different site than
   // last time (or `force`, for the very first call) — re-analyzes it into a fresh task representation.
-  const analyzeCurrentSite = async (force = false): Promise<{ id: string; hasPage: boolean; changed: boolean }> => {
+  // Always re-analyzes rather than loading any previously stored one, since the page may have changed.
+  // `onChangeDetected` fires as soon as a real change is confirmed, before the slow analyze call, so a
+  // caller can show a loading state for the actual duration of the wait rather than just its tail end.
+  const analyzeCurrentSite = async (force = false, onChangeDetected?: () => void): Promise<{ id: string; hasPage: boolean; changed: boolean; task?: TaskNode }> => {
     const pageResponse = await requestPageElements()
-    let id = 'default-site'
+    let id = ''
     if (pageResponse?.url) {
       try {
-        id = new URL(pageResponse.url).hostname || id
+        // Hostname + path + query string, not hostname alone — two different pages on the same site
+        // (e.g. a job listing vs. its application form, or ?job=123 vs. ?job=456 on the same path) are
+        // genuinely different tasks and need their own analysis. This id is used as a single URL path
+        // segment (e.g. /task-representations/{id}/analyze), so it must not contain a literal "/" —
+        // FastAPI/Starlette won't match %2F across a plain path parameter (confirmed live: it 404s), so
+        // any "/" in the path is replaced with "~" here. It's purely an opaque lookup key either way,
+        // never parsed back into a URL.
+        const url = new URL(pageResponse.url)
+        id = `${url.hostname}${url.pathname}${url.search}`.replace(/\/$/, '').replace(/\//g, '~')
       } catch {
-        // keep the default id if the URL can't be parsed
+        // unparseable URL — treated below as "no usable page yet"
       }
     }
-    if (!force && id === siteIdRef.current) return { id, hasPage: !!pageResponse, changed: false }
 
+    // Couldn't reach the content script (still injecting, mid-navigation, or a page it can't run on).
+    // Report it so analyzeCurrentSiteWithRetry comes back around, but DON'T overwrite a known-good
+    // siteIdRef / task representation with a fallback id — that's what left /generate and
+    // /events/process calling the backend with an id it never analyzed, i.e. the 404.
+    if (!id) return { id: siteIdRef.current, hasPage: false, changed: true }
+
+    if (!force && id === siteIdRef.current) return { id, hasPage: true, changed: false }
+
+    onChangeDetected?.()
     siteIdRef.current = id
     setSiteId(id)
     setPageTitle(pageResponse?.title)
     setTaskRepresentation(undefined)
 
-    if (!pageResponse) return { id, hasPage: false, changed: true }
-
     try {
-      const response = await fetch(`${API_URL}/task-representations/${encodeURIComponent(id)}/analyze`, {
+      const response = await fetchWithTimeout(`${API_URL}/task-representations/${encodeURIComponent(id)}/analyze`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(pageResponse),
       })
       if (!response.ok) throw new Error(`Analyze failed: ${response.status}`)
-      setTaskRepresentation(await response.json())
+      const task: TaskNode = await response.json()
+      setTaskRepresentation(task)
+      return { id, hasPage: true, changed: true, task }
     } catch (error) {
       console.error('Unable to analyze page', error)
     }
     return { id, hasPage: true, changed: true }
   }
 
+  // requestPageElements() can race ahead of the content script actually finishing injection/registration
+  // right after a real navigation (or the panel just opening) — confirmed this previously failed silently
+  // (hasPage:false, no retry, no error shown), leaving the panel stuck on stale/no task data until the
+  // user manually reloaded the page. Retries a few times with backoff before actually giving up.
+  const ANALYZE_RETRY_DELAYS_MS = [500, 1200, 2500]
+  const analyzeCurrentSiteWithRetry = async (force: boolean, onChangeDetected?: () => void) => {
+    let site = await analyzeCurrentSite(force, onChangeDetected)
+    for (let attempt = 0; site.changed && !site.hasPage && attempt < ANALYZE_RETRY_DELAYS_MS.length; attempt++) {
+      await new Promise(resolve => window.setTimeout(resolve, ANALYZE_RETRY_DELAYS_MS[attempt]))
+      site = await analyzeCurrentSite(true)
+    }
+    return site
+  }
+
+  const buildFreshIntroEntry = (savedList: SavedInterface[], task?: TaskNode, note = ''): ChatEntry => {
+    if (savedList.length > 0) {
+      return { id: 'intro', role: 'assistant', text: `Would you like to reuse one of your saved interfaces on this page, or create a new one?${note}`, chooseInterface: savedList }
+    }
+    const suggestions = task?.example_difficulties?.length ? task.example_difficulties : []
+    return { id: 'intro', role: 'assistant', text: `${INTRO.text}${note}`, suggestions }
+  }
+
+  // this is to initialize the chat when the panel is opened 
   useEffect(() => {
     let cancelled = false
 
     async function init() {
-      void refreshSavedList()
+      const savedListPromise = refreshSavedList()
 
-      let agreedFromLoad = false
+      let hadExistingWork = false
       const interfacePromise = fetch(`${API_URL}/interface-representation`)
         .then(response => response.ok ? response.json() : Promise.reject(new Error(`Load failed: ${response.status}`)))
         .then((payload: InterfaceRepresentationResponse) => {
           if (cancelled) return
-          agreedFromLoad = payload.agreed
+          hadExistingWork = hasPreferences(payload.tree)
           setAgreed(payload.agreed)
-          if (hasPreferences(payload.tree)) {
-            setTranscript([{ id: 'intro', role: 'assistant', text: 'Continuing with your existing interface preferences.' }])
-          }
         })
         .catch(error => console.error('Unable to load interface representation', error))
 
-      const sitePromise = analyzeCurrentSite(true)
+      const sitePromise = analyzeCurrentSiteWithRetry(true)
+      const savedList = await savedListPromise
       await interfacePromise
       const site = await sitePromise
       if (cancelled) return
-      // Nothing is shown on the actual page until the user has agreed on a support concept.
-      if (site.hasPage && agreedFromLoad) await generateWebpageInterface(site.id)
+
+      const analyzeFailedNote = site.hasPage && !site.task
+        ? " (I couldn't analyze this page just now — it may have timed out — so suggestions won't be grounded in its real content yet.)"
+        : ''
+
+      if (hadExistingWork) {
+        setTranscript([{ id: 'intro', role: 'assistant', text: `Continuing to refine your saved interface support preferences — describe any changes, or check how it looks on this page.${analyzeFailedNote}` }])
+      } else {
+        setTranscript([buildFreshIntroEntry(savedList, site.task, analyzeFailedNote)])
+      }
+
+      // The on-page interface is applied only as a direct result of the user activating a saved
+      // interface or agreeing to one in chat — it is never re-applied automatically on panel open, so
+      // a page refresh clears it until the user chooses again.
       if (!cancelled) setReady(true)
     }
 
@@ -193,37 +296,79 @@ function App() {
   // Re-analyzes the page whenever the user navigates to a different site while the panel is open.
   useEffect(() => {
     const handleTabChange = async () => {
-      const site = await analyzeCurrentSite()
+      const site = await analyzeCurrentSiteWithRetry(false, () => setReady(false))
       if (!site.changed) return
-      setReady(false)
-      if (site.hasPage && agreedRef.current) await generateWebpageInterface(site.id)
+      // Couldn't read the page after retries — don't tear down an agreed concept / task representation
+      // over what's almost certainly a transient content-script miss; leave things as they are.
+      if (!site.hasPage) { setReady(true); return }
+      if (site.hasPage && !site.task) {
+        // analyze either failed or timed out — say so rather than silently carrying on as if nothing
+        // happened, since the task representation genuinely didn't update.
+        setTranscript(current => [...current, { id: `a-analyze-err-${Date.now()}`, role: 'assistant', text: "I couldn't analyze this page (it may have timed out) — you can still describe your difficulty, but suggestions won't be grounded in this page's real content yet." }])
+      }
+      // A genuinely different task is showing now — pull the previous page's widget off so it doesn't
+      // linger here (it stays in the DOM across SPA navigations). The concept itself — the working /
+      // saved interface representation and its agreement — is left intact; the user re-applies it on
+      // this page if they want it, exactly as they would after a refresh.
+      if (agreedRef.current) pushWebpageInterface(null)
       setReady(true)
     }
-    const onUpdated: TabUpdatedListener = (_tabId, changeInfo, tab) => {
-      if (changeInfo.status === 'complete' && tab.active) void handleTabChange()
+    // Debounced + de-duplicated on purpose: some SPAs sync UI state (filters, tabs, scroll position)
+    // into the URL via history.pushState very rapidly, and each one fires onHistoryStateUpdated — without
+    // this, a burst of those could trigger a separate real Anthropic /analyze call for each one (this was
+    // a real, confirmed source of excess API spend, not just a theoretical risk). Collapsing a burst into
+    // one call after things settle, and never running two analyses concurrently, bounds this regardless
+    // of how bursty the triggering source turns out to be.
+    let scheduledTabChange: number | undefined
+    let tabChangeInFlight = false
+    const scheduleTabChange = (delayMs: number) => {
+      window.clearTimeout(scheduledTabChange)
+      scheduledTabChange = window.setTimeout(() => {
+        if (tabChangeInFlight) return
+        tabChangeInFlight = true
+        void handleTabChange().finally(() => { tabChangeInFlight = false })
+      }, delayMs)
     }
-    const onActivated: TabActivatedListener = () => { void handleTabChange() }
+    const onUpdated: TabUpdatedListener = (_tabId, changeInfo, tab) => {
+      if (!tab.active) return
+      if (changeInfo.status === 'complete' || changeInfo.url) scheduleTabChange(150)
+    }
+    const onActivated: TabActivatedListener = () => scheduleTabChange(150)
+    // Single-page apps that change the URL via history.pushState/replaceState (very common on
+    // multi-step application flows) don't fire tabs.onUpdated at all — confirmed live. This is the
+    // event Chrome actually provides for that case; it needs its own "webNavigation" permission.
+    const onHistoryStateUpdated: WebNavListener = (details) => {
+      if (details.frameId !== 0) return
+      extensionChrome?.tabs?.query({ active: true, currentWindow: true }, tabs => {
+        if (tabs[0]?.id === details.tabId) scheduleTabChange(800)
+      })
+    }
     extensionChrome?.tabs?.onUpdated?.addListener(onUpdated)
     extensionChrome?.tabs?.onActivated?.addListener(onActivated)
+    extensionChrome?.webNavigation?.onHistoryStateUpdated?.addListener(onHistoryStateUpdated)
     return () => {
+      window.clearTimeout(scheduledTabChange)
       extensionChrome?.tabs?.onUpdated?.removeListener(onUpdated)
       extensionChrome?.tabs?.onActivated?.removeListener(onActivated)
+      extensionChrome?.webNavigation?.onHistoryStateUpdated?.removeListener(onHistoryStateUpdated)
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
+
+  // Forwards in-page changes to the backend so it can keep the stored webpage_interface fresh. It is
+  // NEVER auto-applied to the page here — the widget only appears when the user explicitly activates a
+  // saved interface or agrees to one in chat. The regenerated version is what they'll see next time
+  // they apply it. (Live checklist state still updates instantly, separately, in content.ts.)
   useEffect(() => {
     const listener = (message: RuntimeMessage) => {
       if (message.type !== 'PAGE_CHANGED' || !message.event || !siteId) return
-      void fetch(`${API_URL}/task-representations/${encodeURIComponent(siteId)}/events/process`, {
+      void fetchWithTimeout(`${API_URL}/task-representations/${encodeURIComponent(siteId)}/events/process`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(message.event),
       })
-        .then(response => response.ok ? response.json() : Promise.reject(new Error(`Event processing failed: ${response.status}`)))
-        .then((result: { related?: boolean; webpage_interface?: InterfaceNode }) => {
-          if (result.related && result.webpage_interface) pushWebpageInterface(result.webpage_interface)
-        })
+        .then(response => response.ok ? undefined : Promise.reject(new Error(`Event processing failed: ${response.status}`)))
         .catch(error => console.error('Unable to process webpage change', error))
     }
     extensionChrome?.runtime?.onMessage?.addListener(listener)
@@ -234,6 +379,8 @@ function App() {
     logRef.current?.scrollTo({ top: logRef.current.scrollHeight, behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth' })
   }, [transcript, isThinking])
 
+
+  // Sending a message function
   const sendMessage = (text = message) => {
     const clean = text.trim()
     if (!clean || isThinking) return
@@ -245,7 +392,7 @@ function App() {
     setIsThinking(true)
     setSynced(false)
 
-    void fetch(`${API_URL}/chat`, {
+    void fetchWithTimeout(`${API_URL}/chat`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ message: clean, history }),
@@ -255,26 +402,45 @@ function App() {
         setTranscript(current => [...current, { id: `a-${current.length}-${Date.now()}`, role: 'assistant', text: result.reply, suggestions: result.suggestions }])
         setSynced(true)
         setAgreed(result.agreed)
-        if (result.agreed && siteId) await generateWebpageInterface(siteId)
+        // Stop "thinking" as soon as the reply is actually shown — generateWebpageInterface below is a
+        // separate, often slower call; leaving isThinking on through it made the typing indicator hang
+        // around well after the message had already appeared.
+        setIsThinking(false)
+        if (result.agreed) {
+          // siteIdRef.current, not the siteId state — this callback closes over the render it was
+          // fired from, whose siteId may be stale if analyzeCurrentSite updated the id after the
+          // message was sent; a mismatched id makes the backend 404 the generate call.
+          if (siteIdRef.current) await generateWebpageInterface(siteIdRef.current)
+        }
       })
       .catch(error => {
         console.error('Unable to process chat message', error)
         setTranscript(current => [...current, { id: `a-err-${Date.now()}`, role: 'assistant', text: "I couldn't reach the assistant. Please try again." }])
         setSynced(true)
+        setIsThinking(false)
       })
-      .finally(() => setIsThinking(false))
   }
 
   const handleRestart = () => {
     if (!window.confirm('End this chat and start over? This clears your interface preferences (shared across every site) and removes the current on-page support until you agree on something new.')) return
     void fetch(`${API_URL}/interface-representation/reset`, { method: 'POST' })
       .then(response => response.ok ? response.json() : Promise.reject(new Error(`Reset failed: ${response.status}`)))
-      .then(() => {
-        setTranscript([{ id: 'intro', role: 'assistant', text: INTRO.text, suggestions: INTRO.suggestions }])
+      .then(async () => {
+        const savedList = await refreshSavedList()
+        if (savedList.length > 0) {
+          setTranscript([{
+            id: 'intro',
+            role: 'assistant',
+            text: 'Would you like to reuse one of your saved interfaces on this page, or create a new one?',
+            chooseInterface: savedList,
+          }])
+        } else {
+          const suggestions = taskRepresentation?.example_difficulties?.length ? taskRepresentation.example_difficulties : []
+          setTranscript([{ id: 'intro', role: 'assistant', text: INTRO.text, suggestions }])
+        }
         setMessage('')
         setAgreed(false)
         pushWebpageInterface(null)
-        void refreshSavedList()
       })
       .catch(error => console.error('Unable to reset interface representation', error))
   }
@@ -301,10 +467,13 @@ function App() {
     void fetch(`${API_URL}/interface-representations/${encodeURIComponent(item.id)}/activate`, { method: 'POST' })
       .then(response => response.ok ? response.json() : Promise.reject(new Error(`Activate failed: ${response.status}`)))
       .then(async (payload: InterfaceRepresentationResponse) => {
+        agreedRef.current = payload.agreed
         setAgreed(payload.agreed)
         setTranscript([{ id: 'intro', role: 'assistant', text: `Switched to "${item.name}". Continue refining it, or describe something new.` }])
         setActiveTab('chat')
-        if (payload.agreed && siteId) await generateWebpageInterface(siteId)
+        if (payload.agreed) {
+          if (siteIdRef.current) await generateWebpageInterface(siteIdRef.current)
+        }
       })
       .catch(error => console.error('Unable to activate interface representation', error))
   }
@@ -358,7 +527,17 @@ function App() {
                 <div className="bubble">
                   <p>{entry.text}</p>
                 </div>
-                {entry.suggestions && entry.suggestions.length > 0 && (
+                {entry.chooseInterface ? (
+                  <div className="suggestion-row">
+                    {entry.chooseInterface.map(item => (
+                      <button key={item.id} type="button" onClick={() => handleActivate(item)}>{item.name}</button>
+                    ))}
+                    <button type="button" onClick={() => {
+                      const suggestions = taskRepresentation?.example_difficulties?.length ? taskRepresentation.example_difficulties : []
+                      setTranscript([{ id: 'intro', role: 'assistant', text: INTRO.text, suggestions }])
+                    }}>Create a new interface</button>
+                  </div>
+                ) : entry.suggestions && entry.suggestions.length > 0 && (
                   <div className="suggestion-row">
                     {entry.suggestions.map(suggestion => (
                       <button key={suggestion} type="button" onClick={() => sendMessage(suggestion)}>{suggestion}</button>
