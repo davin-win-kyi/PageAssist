@@ -1,6 +1,9 @@
 """Anthropic client plumbing shared by every model-backed endpoint.
 
-- `get_client_and_model()` — the api-key/model env lookup all three call sites used to duplicate.
+- `get_client_and_model()` — the api-key/model env lookup all call sites used to duplicate.
+- `create_message()` — a streaming `messages.create`. Streaming is mandatory once `max_tokens` is
+  large enough that the worst case could exceed 10 min (the SDK hard-errors otherwise), which our
+  big task-representation / widget outputs hit.
 - `call_structured_tool()` — forced tool-use + typed validation + retry-on-validation-error, so a
   "nearly right" tool call becomes an "always right" one instead of silently falling back.
 """
@@ -17,6 +20,23 @@ def get_client_and_model() -> tuple[AsyncAnthropic | None, str | None]:
     if not api_key or not model:
         return None, None
     return AsyncAnthropic(api_key=api_key), model
+
+
+def get_fast_client_and_model() -> tuple[AsyncAnthropic | None, str | None]:
+    """A smaller/faster model for cheap incremental work (e.g. patching a task representation with one
+    newly-revealed field). Falls back to ANTHROPIC_MODEL when ANTHROPIC_MODEL_FAST isn't set."""
+    api_key = os.getenv("ANTHROPIC_API_KEY")
+    model = os.getenv("ANTHROPIC_MODEL_FAST") or os.getenv("ANTHROPIC_MODEL")
+    if not api_key or not model:
+        return None, None
+    return AsyncAnthropic(api_key=api_key), model
+
+
+async def create_message(client: AsyncAnthropic, **kwargs: Any):
+    """messages.create via the streaming API, returning the assembled final message. Same return
+    shape as a non-streaming create — callers read `.content` / `.stop_reason` as before."""
+    async with client.messages.stream(**kwargs) as stream:
+        return await stream.get_final_message()
 
 
 async def call_structured_tool(
@@ -42,7 +62,8 @@ async def call_structured_tool(
     last_error: Exception | None = None
 
     for _ in range(max_retries + 1):
-        response = await client.messages.create(
+        response = await create_message(
+            client,
             model=model,
             max_tokens=max_tokens,
             system=system,

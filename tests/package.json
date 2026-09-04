@@ -1,0 +1,9 @@
+{
+  "name": "taskweb-tests",
+  "private": true,
+  "type": "module",
+  "description": "Node test scripts for plugin/ (backend tests are plain Python, see tests/backend/).",
+  "devDependencies": {
+    "linkedom": "^0.18.13"
+  }
+}

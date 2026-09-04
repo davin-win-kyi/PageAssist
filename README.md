@@ -9,24 +9,26 @@ It has two parts, each with its own README:
 
 | Part | Stack | README |
 |---|---|---|
-| `plugin/` | Chrome extension — WXT + React (side panel, content script, sandboxed widget) | [plugin/README.md](plugin/README.md) |
-| `backend/` | FastAPI + Claude, split into `common` / `task` / `interface` packages | [backend/README.md](backend/README.md) |
+| `plugin/` | Chrome extension — WXT + React (side panel, content script, sandboxed widget) | [plugin/PageAssist_plugin.md](plugin/PageAssist_plugin.md) |
+| `backend/` | FastAPI + Claude — `api/` = `endpoints/<domain>/` + `data/` + `utils/`; `definitions/<domain>/` = prompts.py + schema.py | [backend/PageAssist_backend.md](backend/PageAssist_backend.md) |
 
 ## The three representations
 
 Everything in the system is one of three linked representations:
 
-- **Task representation** — a semantic model of what the user is trying to do on **one specific
-  webpage**, grounded strictly in that page's real, visible elements. Shape:
-  `{task_id, task_name, children_tasks[], task_elements[], example_difficulties[]}`, recursive, with
-  each `task_elements` entry copied verbatim from the DOM (`selector`, `tag`, `text`, `role`,
-  `accessibleName`, `visible`). Rebuilt per page; never fabricated.
+- **Task representation** — a task-aware semantic model of **one specific webpage**, grounded strictly
+  in its real, visible elements. Two flat tiers:
+  `{page_purpose, page_type, tasks[], components[], modeling_notes}`.
+  `tasks` are coarse goals (hierarchy via `parent_task_id`); `components` carry per-question
+  granularity — **each individual form field is its own component**, since that's what completion
+  tracking targets — with selectors copied verbatim from the DOM. Rebuilt per page; never fabricated.
 
 - **Interface representation** — a single, **webpage-agnostic** set of support preferences, shaped
-  entirely through chat against a generic preview. Shape: `{component, style, content, children[]}`
-  where `style` is real CSS, `content` is short intent phrases (never literal page text), and
-  `children` are structural groupings generic to the *kind* of task. One is "active" at a time; any
-  can be saved to a reusable database and re-activated on a different site later.
+  entirely through chat against a generic preview. Shape:
+  `{component, description, style, preferences, children[]}` where `style` is real CSS, `preferences`
+  is short intent phrases (never literal page text), `description` is one plain sentence on what the
+  support is, and `children` are structural groupings generic to the *kind* of task. One is "active"
+  at a time; any can be saved to a reusable database and re-activated on a different site later.
 
 - **Webpage interface** — the concrete widget for one site: its task representation realized through
   the active interface representation. Model-generated JavaScript that runs in a sandboxed iframe,
@@ -56,7 +58,8 @@ Everything in the system is one of three linked representations:
   iframe. It draws **no chrome** — the widget authors its own title bar / drag handle / close button
   and asks the host to act via a tiny `window.taskweb` API.
 - The widget is only shown after the user **explicitly** activates a saved interface or agrees to one
-  in chat. Page changes regenerate the stored widget silently but never pop it onto the page.
+  in chat. After that, a structural page change (a form control appears, a wizard step advances)
+  regenerates the widget and updates it in place — but a widget never appears unbidden.
 - Live completion state (a checklist ticking off as you fill fields) is read straight from the DOM by
   the content script — the model never computes or represents it.
 

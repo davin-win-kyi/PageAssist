@@ -1,9 +1,11 @@
 backend/.env
-backend/task_representations.json
-backend/interface_representations.json
+backend/data/
 backend/.venv/
 __pycache__/
 *.pyc
 plugin/node_modules/
 plugin/.wxt/
 plugin/.output/
+
+# top-level tests/
+tests/node_modules/

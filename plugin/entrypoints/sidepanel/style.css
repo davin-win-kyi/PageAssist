@@ -277,6 +277,23 @@ button { cursor: pointer; }
   cursor: not-allowed;
 }
 
+.saved-search {
+  width: 100%;
+  box-sizing: border-box;
+  margin-bottom: 8px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg);
+  color: inherit;
+  padding: 7px 10px;
+  font: inherit;
+  font-size: 13px;
+}
+.saved-search:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
 .saved-list {
   list-style: none;
   margin: 0;
@@ -286,15 +303,22 @@ button { cursor: pointer; }
   gap: 6px;
 }
 
+.saved-row {
+  display: flex;
+  align-items: stretch;
+  gap: 6px;
+}
+
 .saved-item {
-  width: 100%;
+  flex: 1;
+  min-width: 0;
   display: flex;
   align-items: center;
-  justify-content: space-between;
   gap: 8px;
   border: 1px solid var(--border);
+  border-left: 3px solid hsl(var(--saved-hue, 210), 60%, 55%);
   border-radius: 10px;
-  background: var(--bg);
+  background: hsl(var(--saved-hue, 210), 60%, 55%, 0.06);
   padding: 10px 12px;
   font-size: 13px;
   text-align: left;
@@ -302,12 +326,35 @@ button { cursor: pointer; }
 
 .saved-item:hover {
   border-color: var(--accent);
+  border-left-color: hsl(var(--saved-hue, 210), 60%, 55%);
+}
+
+.saved-item-emoji {
+  flex: none;
+  font-size: 15px;
+  line-height: 1;
 }
 
 .saved-item-name {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.saved-item-delete {
+  flex: none;
+  width: 30px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg);
+  color: var(--text-muted);
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+}
+.saved-item-delete:hover {
+  border-color: #e0564e;
+  color: #e0564e;
 }
 
 .saved-empty {
@@ -375,6 +422,25 @@ button { cursor: pointer; }
 .bubble.typing span:nth-child(2) { animation-delay: 0.15s; }
 .bubble.typing span:nth-child(3) { animation-delay: 0.3s; }
 
+/* In-progress status bubble: italic label + animated trailing dots. */
+.bubble.progress {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-style: italic;
+  color: var(--text-muted);
+}
+.bubble.progress .dots { display: inline-flex; gap: 3px; }
+.bubble.progress .dots span {
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: currentColor;
+  animation: typing-bounce 1.1s infinite ease-in-out;
+}
+.bubble.progress .dots span:nth-child(2) { animation-delay: 0.15s; }
+.bubble.progress .dots span:nth-child(3) { animation-delay: 0.3s; }
+
 .suggestion-row {
   display: flex;
   flex-wrap: wrap;
@@ -396,6 +462,29 @@ button { cursor: pointer; }
   border-color: var(--accent);
   color: var(--accent);
 }
+
+.page-unavailable {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  border-top: 1px solid var(--border);
+  background: var(--user-bubble-bg, #f3f4f6);
+  font-size: 13px;
+  color: var(--text-muted);
+}
+.page-unavailable button {
+  flex: 0 0 auto;
+  padding: 5px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg);
+  color: var(--text);
+  cursor: pointer;
+  font-size: 13px;
+}
+.page-unavailable button:hover { background: var(--user-bubble-bg, #f3f4f6); }
 
 .composer {
   flex: 0 0 auto;
@@ -460,7 +549,8 @@ button { cursor: pointer; }
 
 @media (prefers-reduced-motion: reduce) {
   .sync-pill.is-syncing .sync-dot,
-  .bubble.typing span {
+  .bubble.typing span,
+  .bubble.progress .dots span {
     animation: none;
   }
 }

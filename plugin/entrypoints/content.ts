@@ -2,7 +2,7 @@
 // a sandboxed iframe (see entrypoints/sandbox/) with an opaque origin, structurally unable to touch this
 // real page's DOM, cookies, storage, or network. "style" (position/size only) and "items" (what real
 // elements the widget cares about) stay host-owned data, same spirit as before; "code" is everything else.
-type WidgetItem = { selector: string; label?: string; complete?: boolean; [key: string]: unknown };
+type WidgetItem = { selector?: string; label?: string; complete?: boolean; manual?: boolean; [key: string]: unknown };
 type WidgetState = { items?: WidgetItem[]; [key: string]: unknown };
 type Widget = {
   style?: Record<string, unknown>;
@@ -10,126 +10,24 @@ type Widget = {
   state?: WidgetState;
 };
 
-// Blocks constructs that could load external resources or execute code through CSS — a security
-// boundary, not a restriction on which properties/values are allowed. Any ordinary CSS is otherwise
-// applied exactly as authored. (The widget's own internal styling now lives in its generated code and
-// runs inside the sandbox instead — this is only ever applied to the host-owned frame's position/size.)
-function isSafeStyleValue(value: string): boolean {
-  const lower = value.toLowerCase();
-  return !lower.includes('url(') && !lower.includes('expression(') && !lower.includes('javascript:') && !lower.includes('@import');
-}
+import {
+  isFillableElement,
+  isDefaultProneField,
+  fieldValue,
+  isElementComplete,
+} from '../lib/completion';
+import { computeSelector } from '../lib/selectors';
+import { applyStyle } from '../lib/frame-style';
+import { getPageElements, getPageText, currentFieldSet, countFrames, mutationsIncludeFieldChange } from '../lib/page-scan';
+import { describeMutation } from '../lib/mutations';
 
-function applyStyle(element: HTMLElement, style: Record<string, unknown> | undefined) {
-  if (!style) return;
-  for (const [property, value] of Object.entries(style)) {
-    if (typeof value !== 'string' || !isSafeStyleValue(value)) continue;
-    try {
-      element.style.setProperty(property, value);
-    } catch {
-      // Not a valid CSS property name/value — ignore rather than fail the whole render.
-    }
-  }
-}
-
-// Selector computation used consistently everywhere a real element needs one: gathering page elements,
-// tracking what's been clicked, and grounding a widget item — so all three always agree.
-function computeSelector(element: Element): string {
-  const testId = element.getAttribute('data-testid');
-  const ariaLabel = element.getAttribute('aria-label');
-  if ((element as HTMLElement).id) return `#${(element as HTMLElement).id}`;
-  if (testId) return `[data-testid="${testId}"]`;
-  if (ariaLabel) return `[aria-label="${ariaLabel}"]`;
-  return element.tagName.toLowerCase();
-}
-
-// ARIA role: explicit role= if present, else the implicit role for the tag / input type. Empty string
-// when there's no meaningful role. Lets the task representation reason about semantics, not just tags.
-const INPUT_TYPE_ROLE: Record<string, string> = {
-  checkbox: 'checkbox', radio: 'radio', range: 'slider', number: 'spinbutton', search: 'searchbox',
-  email: 'textbox', tel: 'textbox', url: 'textbox', text: 'textbox', password: 'textbox',
-  submit: 'button', button: 'button', reset: 'button',
-};
-function computeRole(element: Element): string {
-  const explicit = element.getAttribute('role');
-  if (explicit) return explicit.trim();
-  const tag = element.tagName.toLowerCase();
-  if (tag === 'a') return element.hasAttribute('href') ? 'link' : '';
-  if (tag === 'button') return 'button';
-  if (tag === 'select') return 'combobox';
-  if (tag === 'textarea') return 'textbox';
-  if (tag === 'input') return INPUT_TYPE_ROLE[(element.getAttribute('type') || 'text').toLowerCase()] || '';
-  if (/^h[1-6]$/.test(tag)) return 'heading';
-  return '';
-}
-
-// Accessible name, in the order a screen reader resolves it: aria-label → aria-labelledby → associated
-// <label> → placeholder → title. Truncated; empty when nothing names the element.
-function computeAccessibleName(element: Element): string {
-  const label = element.getAttribute('aria-label');
-  if (label?.trim()) return label.trim().slice(0, 120);
-
-  const labelledby = element.getAttribute('aria-labelledby');
-  if (labelledby) {
-    const text = labelledby.split(/\s+/)
-      .map((id) => element.ownerDocument.getElementById(id)?.textContent?.trim() || '')
-      .filter(Boolean).join(' ').trim();
-    if (text) return text.slice(0, 120);
-  }
-
-  const id = (element as HTMLElement).id;
-  if (id) {
-    const forLabel = element.ownerDocument.querySelector(`label[for="${CSS.escape(id)}"]`);
-    if (forLabel?.textContent?.trim()) return forLabel.textContent.trim().slice(0, 120);
-  }
-  const wrappingLabel = element.closest('label');
-  if (wrappingLabel?.textContent?.trim()) return wrappingLabel.textContent.trim().slice(0, 120);
-
-  const placeholder = element.getAttribute('placeholder');
-  if (placeholder?.trim()) return placeholder.trim().slice(0, 120);
-  const title = element.getAttribute('title');
-  if (title?.trim()) return title.trim().slice(0, 120);
-  return '';
-}
-
-// Rough visibility: rendered box or client rects present, and not display:none / visibility:hidden.
-// Good enough for the model to prefer real, on-screen elements over hidden template markup.
-function isElementVisible(element: Element): boolean {
-  if (!(element instanceof HTMLElement)) return true;
-  if (element.hidden) return false;
-  if (element.offsetWidth === 0 && element.offsetHeight === 0 && element.getClientRects().length === 0) return false;
-  const style = element.ownerDocument.defaultView?.getComputedStyle(element);
-  return !style || (style.visibility !== 'hidden' && style.display !== 'none');
-}
-
-// A fill-based element (form control/editable region) has its own inherent "has content" state to read
-// live. A click-based one (button/link/ARIA actionable role) has no such inherent state — there's nothing
-// to read off it — so "complete" for those instead means "has been interacted with this session", tracked
-// via interactedSelectors below as clicks happen.
-function isFillableElement(element: Element): boolean {
-  const tag = element.tagName.toLowerCase();
-  return tag === 'input' || tag === 'textarea' || tag === 'select' || (element as HTMLElement).isContentEditable;
-}
+// Completion detection (isElementComplete + its helpers) lives in ../lib/completion.ts so it can be
+// unit-tested against real markup. This file keeps only the stateful click registry it feeds.
 function isClickTrackedElement(element: Element): boolean {
   const tag = element.tagName.toLowerCase();
   if (tag === 'button' || tag === 'a') return true;
   const role = element.getAttribute('role');
   return role === 'button' || role === 'link' || role === 'checkbox' || role === 'switch' || role === 'menuitem';
-}
-
-// Whether a fillable element currently has real content — read live from the actual page element, never
-// from anything the model said, so this is always accurate and needs no model involvement to stay so.
-function isElementFilled(element: Element): boolean {
-  if (element instanceof HTMLInputElement) {
-    const type = element.type.toLowerCase();
-    if (type === 'checkbox' || type === 'radio') return element.checked;
-    if (type === 'file') return element.files !== null && element.files.length > 0;
-    return element.value.trim().length > 0;
-  }
-  if (element instanceof HTMLTextAreaElement || element instanceof HTMLSelectElement) {
-    return element.value.trim().length > 0;
-  }
-  if ((element as HTMLElement).isContentEditable) return (element.textContent || '').trim().length > 0;
-  return false;
 }
 
 // Selectors of elements the user has clicked/activated at least once this page-view — the only signal
@@ -144,14 +42,11 @@ document.addEventListener('click', (event) => {
 function isTrackableElement(element: Element): boolean {
   return isFillableElement(element) || isClickTrackedElement(element);
 }
-function isElementComplete(element: Element, selector: string): boolean {
-  if (isFillableElement(element)) return isElementFilled(element);
-  return interactedSelectors.has(selector);
-}
 
-// A plain selector string (e.g. "#name") can't cross a shadow-DOM boundary via document.querySelector —
-// this tries the direct lookup first, then searches recursively through shadow roots, so selectors for
-// elements collected from inside one (see collectElementsDeep) can still be resolved.
+// A plain selector string (e.g. "#name") can't cross a shadow-DOM or iframe boundary via
+// document.querySelector — this tries the direct lookup, then recurses through shadow roots and
+// same-origin iframes, matching what collectElementsDeep gathered, so widget items grounded in those
+// elements still resolve for live completion tracking.
 function deepQuerySelector(selector: string, root: Document | ShadowRoot = document): Element | null {
   const direct = root.querySelector(selector);
   if (direct) return direct;
@@ -159,6 +54,14 @@ function deepQuerySelector(selector: string, root: Document | ShadowRoot = docum
     if (element.shadowRoot) {
       const found = deepQuerySelector(selector, element.shadowRoot);
       if (found) return found;
+    }
+    if (element.tagName === 'IFRAME' && !element.hasAttribute('data-taskweb-interface')) {
+      let frameDoc: Document | null = null;
+      try { frameDoc = (element as HTMLIFrameElement).contentDocument; } catch { /* cross-origin */ }
+      if (frameDoc) {
+        const found = deepQuerySelector(selector, frameDoc);
+        if (found) return found;
+      }
     }
   }
   return null;
@@ -168,13 +71,15 @@ function deepQuerySelector(selector: string, root: Document | ShadowRoot = docum
 // refreshed — read straight from the real page, never from anything the model said, so this is always
 // accurate and needs no model involvement to stay so. Any other keys the model put in state (a title,
 // custom fields, etc.) pass through untouched.
-function liveifyState(state: WidgetState | undefined): WidgetState | undefined {
+function liveifyState(state: WidgetState | undefined, baselines?: Map<string, string>): WidgetState | undefined {
   if (!state || !Array.isArray(state.items)) return state;
   const items = state.items.map((item) => {
-    if (!item || typeof item.selector !== 'string') return item;
+    // Manual items (a recipe step, a section) have no DOM done-state — the widget owns their
+    // `complete`; the host never touches it. Grounded items must have a real selector string.
+    if (!item || item.manual === true || typeof item.selector !== 'string') return item;
     let target: Element | null = null;
     try { target = deepQuerySelector(item.selector); } catch { /* invalid selector, ignore */ }
-    return { ...item, complete: target ? isElementComplete(target, item.selector) : (item.complete ?? false) };
+    return { ...item, complete: target ? isElementComplete(target, item.selector, baselines, interactedSelectors) : (item.complete ?? false) };
   });
   return { ...state, items };
 }
@@ -188,6 +93,12 @@ export default defineContentScript({
   runAt: 'document_idle',
   main() {
     const root = document.documentElement;
+    // The panel force-injects this script into tabs that were already open when the extension loaded
+    // (Chrome only auto-injects declared content scripts into pages that load AFTER install/reload).
+    // Guard against running twice — the manifest injection and a programmatic one can both land.
+    if (root.dataset.taskwebPlugin === 'connected') return;
+    root.dataset.taskwebPlugin = 'connected';
+
     let applyingInterface = false;
     let contextInvalidated = false;
 
@@ -195,65 +106,15 @@ export default defineContentScript({
       if (contextInvalidated) return;
       contextInvalidated = true;
       window.clearTimeout(mutationTimer);
+      stopLiveStatePoll();
       observer.disconnect();
-      document.removeEventListener('input', handlePageChangeEvent, true);
-      document.removeEventListener('change', handlePageChangeEvent, true);
-      document.removeEventListener('click', handlePageChangeEvent, true);
       document.removeEventListener('input', pushLiveState, true);
       document.removeEventListener('change', pushLiveState, true);
       document.removeEventListener('click', pushLiveState, true);
     }
 
-    // Broad on purpose — links, headings, labels, dropdowns, and anything ARIA-labelled or role-bearing,
-    // not just form controls — so the task representation can be grounded in whatever the page actually
-    // contains rather than a narrow, form-shaped assumption of what's relevant.
-    const PAGE_ELEMENT_SELECTOR = 'a, button, input, textarea, select, option, label, form, h1, h2, h3, h4, h5, h6, [id], [data-testid], [aria-label], [role], [contenteditable="true"]';
-
-    // Many real sites (design-system components, some ATS/checkout widgets) build their actual form
-    // fields inside shadow DOM, invisible to a plain querySelectorAll on the main document — confirmed
-    // this was previously silently missing real fields entirely. Walks into every shadow root found,
-    // recursively, so those elements get picked up too. (Cross-origin iframes are a separate, harder
-    // case — same-document shadow DOM is the common one this addresses.)
-    // Bounded on purpose — a page with many/deeply-nested shadow roots (common in design-system-heavy
-    // real sites) could otherwise mean an unbounded amount of work here (a full querySelectorAll('*')
-    // scan repeated at every level found), risking a slow enough response that the caller's timeout
-    // treats the page as unreachable at all — which stalls analysis (the panel keeps retrying and no
-    // task representation is produced) until the scan finally comes back in time.
-    // Stops as soon as there's more than enough (the caller only ever keeps the first 300 anyway) and
-    // caps recursion depth as a hard backstop against any pathological nesting.
-    const MAX_ELEMENTS_TO_COLLECT = 400;
-    const MAX_SHADOW_DEPTH = 12;
-    function collectElementsDeep(root: Document | ShadowRoot, into: Element[], depth = 0) {
-      if (into.length >= MAX_ELEMENTS_TO_COLLECT || depth > MAX_SHADOW_DEPTH) return;
-      into.push(...root.querySelectorAll(PAGE_ELEMENT_SELECTOR));
-      for (const element of root.querySelectorAll('*')) {
-        if (into.length >= MAX_ELEMENTS_TO_COLLECT) return;
-        if (element.shadowRoot) collectElementsDeep(element.shadowRoot, into, depth + 1);
-      }
-    }
-
-    function getPageElements() {
-      // Never let anything here leave the caller hanging — this is always called synchronously inside a
-      // runtime message handler that must call sendResponse exactly once; an uncaught exception here
-      // previously meant the message port just stayed open until the caller's own timeout gave up,
-      // silently falling back to treating the page as unreachable.
-      try {
-        const elements: Element[] = [];
-        collectElementsDeep(document, elements);
-        return elements.slice(0, 300).map((element, index) => ({
-          id: element.id || `element-${index + 1}`,
-          selector: computeSelector(element),
-          tag: element.tagName.toLowerCase(),
-          text: (element.textContent || '').trim().slice(0, 120),
-          role: computeRole(element),
-          accessibleName: computeAccessibleName(element),
-          visible: isElementVisible(element),
-        }));
-      } catch (error) {
-        console.error('TaskWeb: getPageElements failed', error);
-        return [];
-      }
-    }
+    // getPageElements / currentFieldSet / countFrames + the recursive scan live in ../lib/page-scan.ts
+    // (pure DOM reads, so they can be unit-tested and reused).
 
     window.addEventListener('taskweb:inspect', () => {
       window.postMessage({ source: 'taskweb-plugin', type: 'PAGE_ELEMENTS', elements: getPageElements() }, '*');
@@ -269,6 +130,9 @@ export default defineContentScript({
       document.querySelectorAll('[data-taskweb-interface]').forEach((element) => element.remove());
       interfaceReady = false;
       currentWidgetState = null;
+      lastCompletionSignature = '';
+      fieldBaselines.clear();
+      stopLiveStatePoll();
     }
 
     // No host-drawn chrome. The widget authors every affordance (title bar, drag handle, close/collapse
@@ -288,10 +152,26 @@ export default defineContentScript({
     let interfaceReady = false;
     let interfaceReadyResolvers: Array<() => void> = [];
     let currentWidgetState: WidgetState | null = null;
+    // Value each default-prone tracked field had when the widget was applied — see isElementComplete.
+    const fieldBaselines = new Map<string, string>();
 
-    function waitForInterfaceReady(): Promise<void> {
-      if (interfaceReady) return Promise.resolve();
-      return new Promise((resolve) => { interfaceReadyResolvers.push(resolve); });
+    // Resolves true when the sandbox reports ready, false if it doesn't within the timeout (a page CSP
+    // blocked the sandbox script, the extension URL failed to resolve, etc.) — so applyWebpageInterface
+    // can report failure instead of hanging.
+    function waitForInterfaceReady(timeoutMs = 8000): Promise<boolean> {
+      if (interfaceReady) return Promise.resolve(true);
+      return new Promise((resolve) => {
+        const timer = window.setTimeout(() => resolve(false), timeoutMs);
+        interfaceReadyResolvers.push(() => { window.clearTimeout(timer); resolve(true); });
+      });
+    }
+
+    // Tell the side panel whether the widget actually made it onto the page, so its "Applying…"
+    // indicator can track reality instead of a fixed timer.
+    function reportApplyOutcome(ok: boolean) {
+      try {
+        globalThis.chrome?.runtime?.sendMessage({ source: 'taskweb-plugin', type: 'WEBPAGE_INTERFACE_APPLIED', ok })?.catch(() => {});
+      } catch (_) { /* extension context gone */ }
     }
 
     // Auto-fit the frame height to the sandbox's reported content height, unless the widget has pinned
@@ -377,12 +257,13 @@ export default defineContentScript({
     }
 
     async function applyWebpageInterface(widget: Widget | null | undefined) {
-      if (!widget) { removeWebpageInterface(); return; }
+      if (!widget) { removeWebpageInterface(); reportApplyOutcome(true); return; }
       applyingInterface = true;
 
       const frame = ensureInterfaceFrame();
-      await waitForInterfaceReady();
-      if (!document.body.contains(frame)) { applyingInterface = false; return; } // dismissed while waiting
+      const ready = await waitForInterfaceReady();
+      if (!document.body.contains(frame)) { applyingInterface = false; reportApplyOutcome(false); return; } // dismissed while waiting
+      if (!ready) { applyingInterface = false; reportApplyOutcome(false); return; } // sandbox never came up
 
       const style = widget.style || {};
       applyStyle(frame, style);
@@ -397,63 +278,127 @@ export default defineContentScript({
       if (!style.width) frame.style.width = frame.style.width || '300px';
       if (!style.height && !frame.style.height) frame.style.height = '160px'; // provisional, until the sandbox reports its real content height
 
-      currentWidgetState = liveifyState(widget.state ? structuredClone(widget.state) : { items: [] }) || { items: [] };
+      // Snapshot the starting value of each default-prone field so a real default doesn't read as input.
+      fieldBaselines.clear();
+      for (const item of (widget.state?.items ?? [])) {
+        if (!item || typeof item.selector !== 'string') continue;
+        let el: Element | null = null;
+        try { el = deepQuerySelector(item.selector); } catch { /* invalid selector */ }
+        if (el && isDefaultProneField(el)) fieldBaselines.set(item.selector, fieldValue(el));
+      }
+
+      currentWidgetState = liveifyState(widget.state ? structuredClone(widget.state) : { items: [] }, fieldBaselines) || { items: [] };
       frame.contentWindow?.postMessage({ type: 'init', code: widget.code || '', state: currentWidgetState }, '*');
+      lastCompletionSignature = completionSignature(currentWidgetState);  // baseline — don't notify for it
+      startLiveStatePoll();
 
       applyingInterface = false;
+      reportApplyOutcome(true);
+
+      // handlePageChange early-returns while applyingInterface is true, so any field revealed DURING the
+      // (up to 8s) sandbox-ready wait left no mutation record. Re-diff the field set now against the
+      // pre-apply snapshot so such a reveal still forwards as a structural change.
+      handlePageChange([]);
     }
 
     // Cheap and instant (no network/model call) — re-reads live DOM state for whatever items the current
     // widget cares about and pushes the refreshed state into the sandbox, which re-runs its own
     // render(state). This is what makes a checklist reflect real completion without the model ever having
     // to compute or represent that itself.
+    let lastCompletionSignature = '';
+    function completionSignature(state: WidgetState | null): string {
+      if (!state || !Array.isArray(state.items)) return '';
+      return state.items.map((item) => (item && item.complete ? '1' : '0')).join('');
+    }
     function pushLiveState() {
       if (!currentWidgetState || !interfaceReady) return;
       const frame = document.querySelector('iframe[data-taskweb-interface]') as HTMLIFrameElement | null;
       if (!frame) return;
-      currentWidgetState = liveifyState(currentWidgetState) || currentWidgetState;
+      currentWidgetState = liveifyState(currentWidgetState, fieldBaselines) || currentWidgetState;
       frame.contentWindow?.postMessage({ type: 'state', state: currentWidgetState }, '*');
+      // Tell the panel when a completion flag actually flipped, so it can show a brief "updated" note.
+      const signature = completionSignature(currentWidgetState);
+      if (lastCompletionSignature !== '' && signature !== lastCompletionSignature) {
+        try {
+          globalThis.chrome?.runtime?.sendMessage({ source: 'taskweb-plugin', type: 'WIDGET_STATE_CHANGED' })?.catch(() => {});
+        } catch (_) { /* extension context gone */ }
+      }
+      lastCompletionSignature = signature;
+    }
+
+    // Custom widgets (react-select dropdowns, segmented toggles) update via framework state without
+    // firing native input/change events, so the listeners below never see them. The MutationObserver
+    // does — hook a debounced re-check to it — plus a slow safety-net poll while a widget is shown.
+    let liveStateTimer: number | undefined;
+    let liveStatePoll: number | undefined;
+    function scheduleLiveState() {
+      window.clearTimeout(liveStateTimer);
+      liveStateTimer = window.setTimeout(pushLiveState, 200);
+    }
+    function startLiveStatePoll() {
+      window.clearInterval(liveStatePoll);
+      liveStatePoll = window.setInterval(pushLiveState, 2000);
+    }
+    function stopLiveStatePoll() {
+      window.clearTimeout(liveStateTimer);
+      window.clearInterval(liveStatePoll);
     }
 
     let mutationTimer: number | undefined;
+    let mutationsPendingSince = 0;
     let pendingMutations: MutationRecord[] = [];
+    let lastFieldSet: Set<string> | undefined; // field-ish selectors from the previous page snapshot
+    const MUTATION_DEBOUNCE_MS = 400;
+    const MUTATION_MAX_WAIT_MS = 2500; // force-fire even if churn never leaves a quiet window
 
-    function getSelector(element: Element | null) {
-      if (!element || element.nodeType !== Node.ELEMENT_NODE) return 'document';
-      if (element.id) return `#${element.id}`;
-      if ((element as HTMLElement).dataset?.testid) return `[data-testid="${(element as HTMLElement).dataset.testid}"]`;
-      return element.tagName.toLowerCase();
-    }
-
-    function describeMutation(mutation: MutationRecord) {
-      const target = mutation.target.nodeType === Node.TEXT_NODE ? mutation.target.parentElement : mutation.target as Element;
-      return {
-        type: mutation.type,
-        target: getSelector(target),
-        attribute: mutation.attributeName || null,
-        oldValue: mutation.oldValue || null,
-        addedNodes: mutation.addedNodes.length,
-        removedNodes: mutation.removedNodes.length,
-        text: mutation.type === 'characterData' ? mutation.target.textContent?.slice(0, 160) : null,
-      };
-    }
+    // getSelector / containsFormControl / describeMutation live in ../lib/mutations.ts.
 
     function handlePageChange(mutations: MutationRecord[] = []) {
       if (applyingInterface || contextInvalidated) return;
       pendingMutations.push(...mutations);
+
+      // Trailing debounce (collapse a burst into one send) BUT with a max-wait ceiling: continuous
+      // unrelated DOM churn nearby (an ad, a polling widget, a "typing…" indicator) never leaves a
+      // quiet MUTATION_DEBOUNCE_MS window, which would otherwise starve real updates forever.
+      const now = Date.now();
+      if (!mutationTimer) mutationsPendingSince = now;
       window.clearTimeout(mutationTimer);
+      const wait = now - mutationsPendingSince >= MUTATION_MAX_WAIT_MS ? 0 : MUTATION_DEBOUNCE_MS;
       mutationTimer = window.setTimeout(() => {
+        mutationTimer = undefined;
         const pageElements = getPageElements();
         const activeElement = document.activeElement;
+        const described = pendingMutations.slice(0, 100).map(describeMutation);
+        // "Structural" = the field-ish set changed vs. the last snapshot (see currentFieldSet). The
+        // snapshot is seeded at startup and again after each widget apply, so the very first real change
+        // after a page settles is diffed against a genuine baseline rather than always reading as 0.
+        const currentFields = currentFieldSet(pageElements);
+        const addedSelectors: string[] = [];
+        const removedSelectors: string[] = [];
+        if (lastFieldSet) {
+          currentFields.forEach((s) => { if (!lastFieldSet!.has(s)) addedSelectors.push(s); });
+          lastFieldSet.forEach((s) => { if (!currentFields.has(s)) removedSelectors.push(s); });
+        }
+        lastFieldSet = currentFields;
+        const structural = addedSelectors.length + removedSelectors.length >= 1;
+        // The actual added field descriptors, so the panel can PATCH the task representation (splice in
+        // just these) instead of re-modelling the whole page.
+        const addedSet = new Set(addedSelectors);
+        const addedFields = pageElements.filter((e) => addedSet.has(e.selector)).slice(0, 25);
         const event = {
           type: 'page.changed',
           url: location.href,
+          structural,
+          fieldsAdded: addedSelectors.length,
+          fieldsRemoved: removedSelectors.length,
+          addedFields,
+          removedFields: removedSelectors.slice(0, 25),
           target: {
             title: document.title,
             forms: document.forms.length,
             selector: activeElement?.id ? `#${activeElement.id}` : activeElement?.tagName?.toLowerCase(),
           },
-          payload: { elements: pageElements.length, mutations: pendingMutations.slice(0, 100).map(describeMutation) },
+          payload: { elements: pageElements.length, mutations: described },
         };
         pendingMutations = [];
         if (globalThis.chrome?.runtime?.sendMessage) {
@@ -470,10 +415,8 @@ export default defineContentScript({
           }
         }
         window.postMessage({ source: 'taskweb-plugin', type: 'PAGE_CHANGED', event }, '*');
-      }, 400);
+      }, wait);
     }
-
-    const handlePageChangeEvent = () => handlePageChange();
 
     // The widget's own content lives inside its sandboxed iframe's separate (opaque-origin) document,
     // invisible to this observer by construction — so its own updates can never self-trigger a "page
@@ -481,6 +424,8 @@ export default defineContentScript({
     // which the closest('[data-taskweb-interface]') checks below still exclude.
     const observer = new MutationObserver((mutations) => {
       const changedOutsideInterface = mutations.some((mutation) => {
+        if (mutation.type === 'attributes' && mutation.attributeName === 'data-tw-ref') return false; // our own stamping
+
         const targetElement = mutation.target.nodeType === Node.TEXT_NODE ? mutation.target.parentElement : mutation.target;
         const target = targetElement instanceof Element ? targetElement : null;
         const addedOutsideInterface = [...mutation.addedNodes].some((node) => {
@@ -492,9 +437,19 @@ export default defineContentScript({
         return !target?.closest('[data-taskweb-interface]') && (addedOutsideInterface || removedOutsideInterface || mutation.type === 'attributes');
       });
       const hasTextChange = mutations.some((mutation) => mutation.type === 'characterData');
-      if (changedOutsideInterface || hasTextChange) handlePageChange(mutations);
+      if (changedOutsideInterface || hasTextChange) {
+        // Structural pipeline ONLY when a real field element actually entered or left the DOM — NOT
+        // when an existing control merely expands/collapses (opening a react-select adds only
+        // listbox/option nodes, which this ignores). That misfire used to consume the debounce window
+        // so the real follow-up field's reveal never registered as structural.
+        if (mutationsIncludeFieldChange(mutations)) {
+          handlePageChange(mutations); // 400ms-debounced → backend (possible structural regeneration)
+        }
+        scheduleLiveState();           // 200ms-debounced → local re-check of completion flags (always)
+      }
     });
 
+    // set up the observers for webpage changes, that are not the webpage interface
     function observeRoot(rootNode: Document | ShadowRoot) {
       observer.observe(rootNode, { childList: true, subtree: true, attributes: true, characterData: true, attributeOldValue: true, characterDataOldValue: true });
       rootNode.querySelectorAll?.('*').forEach((element) => {
@@ -511,6 +466,9 @@ export default defineContentScript({
     }
 
     observeRoot(document);
+    // Seed the structural-change baseline immediately, so the first field the page reveals after it
+    // settles is diffed against a real snapshot instead of establishing one (and reading as "no change").
+    lastFieldSet = currentFieldSet();
     document.querySelectorAll('iframe').forEach((frame) => frame.addEventListener('load', () => {
       try {
         if (frame.contentDocument) observeRoot(frame.contentDocument);
@@ -518,12 +476,10 @@ export default defineContentScript({
         // Cross-origin frames cannot be observed by the content script.
       }
     }));
-    document.addEventListener('input', handlePageChangeEvent, true);
-    document.addEventListener('change', handlePageChangeEvent, true);
-    document.addEventListener('click', handlePageChangeEvent, true);
-    // Separate from the 400ms-debounced pipeline above (which forwards to the backend for possible
-    // structural regeneration) — this one just pushes refreshed live state into the sandbox, so it can
-    // run instantly, on every keystroke/click, with no network/model round-trip at all.
+    // Structural detection is driven ONLY by the MutationObserver above (a field entering/leaving the
+    // DOM is always a mutation). It used to ALSO run on every input/change/click, which meant a plain
+    // click — opening a dropdown, focusing a field — kicked off a page scan + PAGE_CHANGED every time.
+    // These listeners only refresh live completion state, which is cheap and has no network call.
     document.addEventListener('input', pushLiveState, true);
     document.addEventListener('change', pushLiveState, true);
     document.addEventListener('click', pushLiveState, true);
@@ -534,7 +490,7 @@ export default defineContentScript({
           void applyWebpageInterface(message.tree);
           sendResponse({ ok: true });
         } else if (message?.type === 'GET_PAGE_ELEMENTS') {
-          sendResponse({ url: location.href, title: document.title, elements: getPageElements() });
+          sendResponse({ url: location.href, title: document.title, elements: getPageElements(), pageText: getPageText(), frames: countFrames() });
         }
       });
     } catch (_) {
@@ -542,6 +498,5 @@ export default defineContentScript({
     }
 
     window.postMessage({ source: 'taskweb-plugin', type: 'READY', url: location.href }, '*');
-    root.dataset.taskwebPlugin = 'connected';
   },
 });

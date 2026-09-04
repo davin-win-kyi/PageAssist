@@ -27,19 +27,28 @@ Set `VITE_API_URL` if the backend is not at `http://localhost:8000`.
 | `entrypoints/sidepanel/` | extension page (React) | the chat UI, saved-interfaces list, orchestration |
 | `entrypoints/content.ts` | every web page | reads the page, watches it for change, hosts the widget iframe |
 | `entrypoints/sandbox/` | `allow-scripts` iframe | runs the model-generated widget code in isolation |
+| `lib/` | shared modules | `completion.ts` (live done/undone detection), `selectors.ts`, `page-scan.ts`, `mutations.ts`, `frame-style.ts` (content-script helpers), `api.ts` + `extension.ts` (panel helpers) |
+
+`lib/completion.ts` has node tests at [`../tests/plugin/`](../tests/PageAssist_Tests.md) — `node tests/plugin/completion.test.ts`.
 
 ### Side panel (`sidepanel/App.tsx`)
 
 The orchestrator. It:
 
 - Computes a `site_id` from the active tab's URL (`hostname + pathname + search`, `/` → `~`) and, on
-  a real page change, calls `POST /task-representations/{id}/analyze`.
+  a real page change, calls `POST /task-representations/{id}/analyze`. If the active tab has no content
+  script (it was already open when the extension loaded), the panel force-injects it via
+  `chrome.scripting.executeScript` before retrying — no page refresh needed.
 - Chats with the backend (`POST /chat`) to shape the **interface representation**; manages the saved
-  database (list / save / activate).
+  database (list / save / activate / delete; searchable, with a per-entry emoji + colour accent
+  derived from its id).
 - On explicit **activate** or **agree-in-chat**, calls `POST /webpage-interfaces/{id}/generate` and
   pushes the result to the content script.
-- Listens for `PAGE_CHANGED` messages and forwards them to `POST /events/process`. It does **not**
-  auto-apply anything that comes back — the widget only appears on explicit user action.
+- Listens for `PAGE_CHANGED` messages: a *structural* one (a field element entered/left the DOM) while
+  a widget is showing **patches** the task representation with just the added/removed fields
+  (`POST /task-representations/{id}/patch` — fast) then regenerates the widget, falling back to a full
+  `analyze` if the patch fails. Value edits are ignored (the checklist updates live client-side). The
+  widget only ever appears on explicit user action.
 - Debounces navigation events (`tabs.onUpdated` / `onActivated` / `webNavigation.onHistoryStateUpdated`)
   and never runs two analyses at once — a burst of SPA `pushState` calls collapses into one analyze.
 
@@ -48,10 +57,17 @@ The orchestrator. It:
 The page-side agent. Four jobs:
 
 1. **Read the page** — `getPageElements()` walks the DOM (into shadow roots, bounded) and returns up
-   to 300 elements as `{id, selector, tag, text, role, accessibleName, visible}`. Exposed via the
-   `GET_PAGE_ELEMENTS` message and the `taskweb:inspect` window event.
-2. **Watch for change** — a `MutationObserver` plus capture-phase `input`/`change`/`click` listeners,
-   debounced 400 ms, emit a `PAGE_CHANGED` runtime message describing the mutation.
+   the priority-sorted top ≤500 as `{id, selector, tag, text, role, accessibleName, visible}` (form
+   controls / form structure / headings first, visible before hidden). Exposed via the
+   `GET_PAGE_ELEMENTS` message (which also returns `pageText` — the page's readable `innerText`, used
+   at generation time for content items like recipe steps) and the `taskweb:inspect` window event.
+2. **Watch for change** — a `MutationObserver` (debounced 400 ms) emits a `PAGE_CHANGED` runtime
+   message, but ONLY when a mutation actually **added or removed a form field**
+   (`mutationsIncludeFieldChange`, ignoring anything inside an open dropdown/popover). A react-select
+   expanding/collapsing adds only `listbox`/`option` nodes, and a plain click/focus adds nothing — so
+   neither reaches the structural pipeline at all. `structural` is then confirmed by diffing
+   `currentFieldSet()` against the last snapshot. (Completion state has its own instant, un-debounced
+   `input`/`change`/`click` listeners — see step 4.)
 3. **Host the widget** — creates the sandboxed iframe (`sandbox.html`) and posts the widget's `code`
    and `state` into it. Draws **no chrome of its own**.
 4. **Keep live state accurate** — a second, un-debounced set of listeners re-reads each tracked
@@ -67,8 +83,10 @@ or navigate the top frame. `fetch` / `XMLHttpRequest` / `WebSocket` / `window.op
 
 The generated code must assign `window.render = function(state) { ... }` and nothing else at the top
 level. `render(state)` is re-called on every state change and must be idempotent (reset
-`document.body` at the start of each call). For each `state.items` entry it must show the host-managed
-`item.complete` flag.
+`document.body` at the start of each call). `state.items` are either **grounded** (a `selector`; the
+host keeps `item.complete` live from the DOM — the widget only shows it) or **manual**
+(`manual: true`, no selector — a recipe step / section; the widget renders a checkbox and owns its
+checked state, `liveifyState` leaves it alone).
 
 ## Messaging
 
