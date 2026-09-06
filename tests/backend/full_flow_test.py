@@ -125,8 +125,12 @@ check("widget state.items is list", isinstance(w.get("state", {}).get("items"), 
 w_items = w.get("state", {}).get("items", [])
 if w_items:
     given = {e["selector"] for e in PAGE["elements"]}
-    check("widget items reference real selectors", all(it.get("selector") in given for it in w_items),
-          str([it.get("selector") for it in w_items if it.get("selector") not in given]))
+
+    def _item_selectors(it):
+        return it.get("selectors") if isinstance(it.get("selectors"), list) else [it.get("selector")]
+
+    bad = [s for it in w_items for s in _item_selectors(it) if s not in given]
+    check("widget items reference real selectors", not bad, str(bad))
 r = c.get(f"/webpage-interfaces/{SITE}")
 check("GET webpage interface 200", r.status_code == 200 and "code" in r.json())
 check("GET webpage interface other site 404", c.get("/webpage-interfaces/nope~x").status_code == 404)
@@ -140,6 +144,44 @@ c.post("/chat", json={"message": "hi", "history": []})  # writes a chat_log line
 c.post("/interface-representation/reset")               # new chat -> should wipe it
 _log = DATA_DIR / "chat_log.jsonl"
 check("chat_log.jsonl empty after /reset", not _log.exists() or _log.read_text().strip() == "")
+
+print("\n== 9. enforce_bundled_selectors (model can't be trusted to pick the right single control) ==")
+from api.endpoints.webpage_interface.router import enforce_bundled_selectors
+
+_bundle_tr = {"components": [
+    {"component_id": "c1", "member_selectors": ["#country", "#phone"]},
+    {"component_id": "c2", "member_selectors": ["#email"]},
+]}
+check("model grounds on the auxiliary control alone -> upgraded to the full bundle",
+      enforce_bundled_selectors([{"label": "Phone", "selector": "#country"}], _bundle_tr)
+      == [{"label": "Phone", "selectors": ["#country", "#phone"]}])
+check("model grounds on the real-answer control alone -> same upgraded result",
+      enforce_bundled_selectors([{"label": "Phone", "selector": "#phone"}], _bundle_tr)
+      == [{"label": "Phone", "selectors": ["#country", "#phone"]}])
+check("model under-selects via `selectors` -> upgraded to the full bundle",
+      enforce_bundled_selectors([{"label": "Phone", "selectors": ["#phone"]}], _bundle_tr)
+      == [{"label": "Phone", "selectors": ["#country", "#phone"]}])
+check("single-control item is left alone",
+      enforce_bundled_selectors([{"label": "Email", "selector": "#email"}], _bundle_tr)
+      == [{"label": "Email", "selector": "#email"}])
+check("manual item is left alone",
+      enforce_bundled_selectors([{"label": "Step 1", "manual": True}], _bundle_tr)
+      == [{"label": "Step 1", "manual": True}])
+
+# Regression: a plain field's component legitimately bundles its own <label>'s id alongside the
+# input's id in member_selectors (id="first_name-label" next to id="first_name" is a near-universal
+# aria-labelledby pattern) -- that must NOT be treated as "2 controls that must both be filled",
+# since a <label> can never read as filled and would lock the item incomplete forever.
+_label_tr = {"components": [
+    {"component_id": "c2", "member_selectors": ["#first_name-label", "#first_name"]},
+    {"component_id": "c3", "member_selectors": ["#phone-description", "#phone-error", "#phone-help", "#phone"]},
+]}
+check("a component's own <label> id is not mistaken for a second required control",
+      enforce_bundled_selectors([{"label": "First Name", "selector": "#first_name"}], _label_tr)
+      == [{"label": "First Name", "selector": "#first_name"}])
+check("description/error/help scaffolding ids are not mistaken for required controls either",
+      enforce_bundled_selectors([{"label": "Phone", "selector": "#phone"}], _label_tr)
+      == [{"label": "Phone", "selector": "#phone"}])
 
 print("\n== RESULT ==")
 if FAIL:

@@ -111,7 +111,7 @@ const afterReveal = currentFieldSet();
 const revealDiff = diff(baseline, afterReveal);
 check('after answering Hispanic/Latino: #race is now a tracked field', afterReveal.has('#race'), true);
 check('answering Hispanic/Latino registers as a STRUCTURAL change', revealDiff.structural, true);
-check('  fieldsAdded >= 1 (the input, and/or its label)', revealDiff.added >= 1, true);
+check('  fieldsAdded === 1 (the revealed combobox input; a bare <label> no longer counts)', revealDiff.added, 1);
 check('previously-tracked fields survive the diff (no false removals of real fields)',
   ['#gender', '#veteran_status', '#disability_status', '#first_name'].every((s) => afterReveal.has(s)), true);
 
@@ -148,6 +148,52 @@ check('un-hiding an existing <input> (attributes/hidden) IS a field change',
   mutationsIncludeFieldChange([mut({ type: 'attributes', attributeName: 'hidden', target: inputDoc.querySelector('#conditional') })]), true);
 check('an attribute flip on a plain <div> is NOT a field change',
   mutationsIncludeFieldChange([mut({ type: 'attributes', attributeName: 'class', target: frag('<div></div>').querySelector('div') })]), false);
+
+console.log('\n== a <label> is not a field: caption churn inside an unchanged question ==');
+{
+  // Same markup parsed twice = two genuinely different DOM nodes (a fresh document each time), the
+  // way a framework's re-render swaps in new elements. Identity rides on the control's stable id
+  // (#resume), never on the bare <label> — which no longer contributes to the field set at all.
+  loadPage('<label>Resume/CV</label><input id="resume" type="file" />');
+  const remountA = currentFieldSet();
+  loadPage('<label>Resume/CV</label><input id="resume" type="file" />');
+  const remountB = currentFieldSet();
+  check('a remounted question with IDENTICAL markup is not a structural change', diff(remountA, remountB).structural, false);
+
+  loadPage('<label>Please identify your race/ethnicity</label><input id="race" type="text" />');
+  const genuinelyNew = currentFieldSet();
+  check('a different control id (#resume -> #race) still registers as a real change', diff(remountA, genuinelyNew).structural, true);
+
+  // The real Greenhouse resume widget: a row of "Attach / Dropbox / Google Drive / Enter manually"
+  // buttons, each with a visually-hidden <label> caption, plus one hidden <input type="file">. On
+  // upload the whole button row (buttons + caption labels) is replaced by a "<filename> ×" chip, but
+  // the <input type="file"> stays mounted (it carries the FileList for form submit). That swap must
+  // NOT read as a structural change — the resume question didn't gain or lose a field.
+  const RESUME_EMPTY = `
+    <div role="group" aria-labelledby="upload-label-resume" class="file-upload">
+      <div id="upload-label-resume" class="label">Resume/CV</div>
+      <div class="button-container">
+        <div class="secondary-button"><button type="button">Attach</button><label class="visually-hidden" for="resume">Attach</label></div>
+        <div class="secondary-button"><button type="button">Dropbox</button></div>
+        <div class="secondary-button"><button type="button">Google Drive</button></div>
+        <div class="secondary-button"><button type="button">Enter manually</button><label class="visually-hidden" for="resume_text">Enter manually</label></div>
+      </div>
+      <input id="resume" class="visually-hidden" type="file" />
+    </div>`;
+  const RESUME_UPLOADED = `
+    <div role="group" aria-labelledby="upload-label-resume" class="file-upload">
+      <div id="upload-label-resume" class="label">Resume/CV</div>
+      <div class="chip"><span>my_resume.pdf</span><button type="button" aria-label="Remove">×</button></div>
+      <input id="resume" class="visually-hidden" type="file" />
+    </div>`;
+  loadPage(RESUME_EMPTY);
+  const resumeBefore = currentFieldSet();
+  loadPage(RESUME_UPLOADED);
+  const resumeAfter = currentFieldSet();
+  check('attaching a file (button row + caption labels -> filename chip) is NOT structural',
+    diff(resumeBefore, resumeAfter).structural, false);
+  check('  and the file input is still tracked throughout', resumeAfter.has('#resume') && resumeBefore.has('#resume'), true);
+}
 
 console.log(`\n== RESULT ==\n  ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

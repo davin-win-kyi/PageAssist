@@ -142,13 +142,39 @@ export function getPageText(cap = 12000): string {
 // "Field-ish" elements whose set entering/leaving the DOM is a STRUCTURAL page change (a question
 // revealed, a section removed) — NOT a value rendering inside an existing control, and NOT a dropdown
 // menu opening (its options are filtered out by getPageElements; `listbox` is deliberately not here).
-const FIELD_TAGS = ['input', 'textarea', 'select', 'label', 'fieldset', 'legend'];
+// A <label> is deliberately NOT here: it's the accessible NAME of a control, never a field of its
+// own, and every genuine "question revealed" already brings a real control (input/select/textarea or
+// a role-bearing widget). Counting bare labels made a file-upload widget swapping its
+// "Attach / Dropbox / Google Drive / Enter manually" caption labels for a "<filename> ×" chip read as
+// fields being removed — a false structural change on an unchanged question.
+const FIELD_TAGS = ['input', 'textarea', 'select', 'fieldset', 'legend'];
 const FIELD_ROLES = new Set(['textbox', 'combobox', 'checkbox', 'radio', 'searchbox', 'spinbutton', 'switch']);
+
+// A selector built from a real id/name/testid/aria-label (vs. a data-tw-ref stamp or a bare tag) —
+// i.e. one that keeps naming the SAME element if the framework leaves it alone across a re-render.
+function hasStableIdentity(selector: string): boolean {
+  return selector.startsWith('#') || selector.includes('[data-testid') || selector.includes('[aria-label') || /\[name=/.test(selector);
+}
+
+// The identity a field-ish element contributes to the structural diff. A <legend>/<fieldset> wrapper
+// is the kind of element a framework is most likely to fully discard and rebuild for a UI-state change
+// within an EXISTING group — when one has no stable selector of its own, key it by its own text
+// instead of the freshly-stamped data-tw-ref its replacement node would get, so the SAME group
+// re-rendering doesn't read as "removed, then added". Real form controls (input/select/textarea) keep
+// their DOM identity across nearly every framework's re-render, so they always use their selector.
+function fieldIdentity(e: ScannedElement): string {
+  if (!hasStableIdentity(e.selector) && (e.tag === 'legend' || e.tag === 'fieldset')) {
+    const text = (e.accessibleName || e.text || '').trim().toLowerCase();
+    if (text) return `${e.tag}:${text.slice(0, 80)}`;
+  }
+  return e.selector;
+}
+
 export function currentFieldSet(pageElements: ScannedElement[] = getPageElements()): Set<string> {
   return new Set(
     pageElements
       .filter((e) => FIELD_TAGS.includes(e.tag) || FIELD_ROLES.has(e.role || ''))
-      .map((e) => e.selector),
+      .map(fieldIdentity),
   );
 }
 
@@ -157,7 +183,7 @@ export function currentFieldSet(pageElements: ScannedElement[] = getPageElements
 // a section removed) apart from an existing control merely expanding/collapsing (opening a dropdown
 // adds only listbox/option nodes; its options and menu are excluded here and by POPUP_SELECTOR).
 export const FIELD_NODE_SELECTOR =
-  'input, textarea, select, label, fieldset, legend, '
+  'input, textarea, select, fieldset, legend, '
   + '[role="textbox"], [role="combobox"], [role="checkbox"], [role="radio"], [role="searchbox"], [role="spinbutton"], [role="switch"]';
 
 function nodeIntroducesField(node: Node): boolean {

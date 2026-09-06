@@ -46,12 +46,16 @@ CHAT_DECISION_TOOL = {
             "interface_representation": {
                 "type": ["object", "null"],
                 "description": (
-                    "The full updated {component, description, style, preferences, children} tree, only "
-                    "when this reply changes it; otherwise null. \"preferences\" is short phrases (never "
-                    "literal instance text — the representation is structure-independent). \"description\" "
-                    "is one sentence on what this support is and does (useful when \"component\" is a "
-                    "bespoke name). \"children\" are structural groupings generic to the kind of task "
-                    "(e.g. \"a section for the first person\"), never concrete real-page items."
+                    "The full updated {component, description, style, preferences, children} tree, ONLY "
+                    "when this reply actually changes it; null otherwise — including a turn that merely "
+                    "confirms it ('looks good', 'yes, save that'). Non-null re-triggers showing the widget "
+                    "on the page, so resending an unchanged tree makes that happen for no reason. Not tied "
+                    "to `agreed`, which stays true across many later turns this must stay null on. "
+                    "\"preferences\" is short phrases (never literal instance text — the representation is "
+                    "structure-independent). \"description\" is one sentence on what this support is and "
+                    "does (useful when \"component\" is a bespoke name). \"children\" are structural "
+                    "groupings generic to the kind of task (e.g. \"a section for the first person\"), never "
+                    "concrete real-page items."
                 ),
             },
             "agreed": {

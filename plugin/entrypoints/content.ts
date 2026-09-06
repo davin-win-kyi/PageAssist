@@ -2,7 +2,7 @@
 // a sandboxed iframe (see entrypoints/sandbox/) with an opaque origin, structurally unable to touch this
 // real page's DOM, cookies, storage, or network. "style" (position/size only) and "items" (what real
 // elements the widget cares about) stay host-owned data, same spirit as before; "code" is everything else.
-type WidgetItem = { selector?: string; label?: string; complete?: boolean; manual?: boolean; [key: string]: unknown };
+type WidgetItem = { selector?: string; selectors?: string[]; label?: string; complete?: boolean; manual?: boolean; [key: string]: unknown };
 type WidgetState = { items?: WidgetItem[]; [key: string]: unknown };
 type Widget = {
   style?: Record<string, unknown>;
@@ -15,6 +15,7 @@ import {
   isDefaultProneField,
   fieldValue,
   isElementComplete,
+  isItemComplete,
 } from '../lib/completion';
 import { computeSelector } from '../lib/selectors';
 import { applyStyle } from '../lib/frame-style';
@@ -67,6 +68,13 @@ function deepQuerySelector(selector: string, root: Document | ShadowRoot = docum
   return null;
 }
 
+// A widget item may track ONE control (`selector`) or several that must ALL be filled to answer one
+// question (`selectors` — first + last name, a full address). Normalize to the list form.
+function itemSelectors(item: WidgetItem): string[] {
+  if (Array.isArray(item.selectors) && item.selectors.length > 0) return item.selectors.filter((s): s is string => typeof s === 'string');
+  return typeof item.selector === 'string' ? [item.selector] : [];
+}
+
 // Re-reads live DOM state for every item in a widget's state and returns it with "complete" flags
 // refreshed — read straight from the real page, never from anything the model said, so this is always
 // accurate and needs no model involvement to stay so. Any other keys the model put in state (a title,
@@ -75,11 +83,20 @@ function liveifyState(state: WidgetState | undefined, baselines?: Map<string, st
   if (!state || !Array.isArray(state.items)) return state;
   const items = state.items.map((item) => {
     // Manual items (a recipe step, a section) have no DOM done-state — the widget owns their
-    // `complete`; the host never touches it. Grounded items must have a real selector string.
-    if (!item || item.manual === true || typeof item.selector !== 'string') return item;
-    let target: Element | null = null;
-    try { target = deepQuerySelector(item.selector); } catch { /* invalid selector, ignore */ }
-    return { ...item, complete: target ? isElementComplete(target, item.selector, baselines, interactedSelectors) : (item.complete ?? false) };
+    // `complete`; the host never touches it.
+    if (!item || item.manual === true) return item;
+    const selectors = itemSelectors(item);
+    if (selectors.length === 0) return item;
+    let resolvedAny = false;
+    const resolve = (selector: string) => {
+      try {
+        const el = deepQuerySelector(selector);
+        if (el) resolvedAny = true;
+        return el;
+      } catch { return null; } // invalid selector, ignore
+    };
+    const complete = isItemComplete(selectors, resolve, baselines, interactedSelectors);
+    return { ...item, complete: resolvedAny ? complete : (item.complete ?? false) };
   });
   return { ...state, items };
 }
@@ -281,10 +298,12 @@ export default defineContentScript({
       // Snapshot the starting value of each default-prone field so a real default doesn't read as input.
       fieldBaselines.clear();
       for (const item of (widget.state?.items ?? [])) {
-        if (!item || typeof item.selector !== 'string') continue;
-        let el: Element | null = null;
-        try { el = deepQuerySelector(item.selector); } catch { /* invalid selector */ }
-        if (el && isDefaultProneField(el)) fieldBaselines.set(item.selector, fieldValue(el));
+        if (!item) continue;
+        for (const selector of itemSelectors(item)) {
+          let el: Element | null = null;
+          try { el = deepQuerySelector(selector); } catch { /* invalid selector */ }
+          if (el && isDefaultProneField(el)) fieldBaselines.set(selector, fieldValue(el));
+        }
       }
 
       currentWidgetState = liveifyState(widget.state ? structuredClone(widget.state) : { items: [] }, fieldBaselines) || { items: [] };

@@ -91,7 +91,16 @@ def tracked_selectors(task_rep):
 
 
 def item_selectors(widget):
-    return [it.get("selector") for it in widget.get("state", {}).get("items", [])]
+    # An item tracks either one control (`selector`) or several that must ALL be filled to answer
+    # one question (`selectors` — first+last name, a split address); flatten both to a flat list so
+    # a membership check ("is #race tracked by some item") doesn't miss a bundled item's selectors.
+    out = []
+    for it in widget.get("state", {}).get("items", []):
+        if isinstance(it.get("selectors"), list):
+            out.extend(s for s in it["selectors"] if isinstance(s, str))
+        elif isinstance(it.get("selector"), str):
+            out.append(it["selector"])
+    return out
 
 
 print("== setup: activate a saved checklist so there's an agreed active tree ==")
@@ -153,6 +162,16 @@ check("regenerated widget from the patched rep includes #race", "#race" in item_
 r = c.post(f"/task-representations/{SITE}/patch", json={"added": [], "removed": ["#race"]})
 check("patch removes a departed field", "#race" not in tracked_selectors(r.json()))
 check("patch 404 for an un-analyzed site", c.post("/task-representations/never~seen/patch", json={"added": [], "removed": []}).status_code == 404)
+
+n_before_cosmetic = len(c.get(f"/task-representations/{SITE}").json()["components"])
+r = c.post(f"/task-representations/{SITE}/patch", json={
+    "added": [], "removed": [".upload-btn-attach", ".upload-btn-dropbox"],  # a file-upload UI swap —
+    # these were never modelled as their own components, so removing them shouldn't register as a
+    # real task-representation change (App.tsx skips /generate + the "detected a change" line on this).
+})
+check("cosmetic-only removal reports changed=false", r.json().get("changed") is False)
+check("cosmetic-only removal leaves components untouched",
+      len(r.json()["components"]) == n_before_cosmetic)
 
 print("\n== 4. cap check: a full-length form must not drop the newly revealed field ==")
 # The real page has ~26 fields; components_to_items caps at 20. Make sure a field revealed LATE

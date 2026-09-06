@@ -10,19 +10,39 @@ concrete, code-driven widget grounded in that page's real elements.
   is its own component, with `label`, `dom_selector`, `member_selectors`).
 - preferences: short phrases (what to show / how to behave); `children` are structural groupings
   generic to the kind of task. REALIZE these against this page's actual components.
-- page text (may be absent): the page's readable prose. Use it when the support is about page CONTENT
-  rather than form fields — a recipe step tracker, an article-section progress bar, a "what to do
-  next" list on a page that has no relevant inputs.
+- page text (may be absent): the page's readable prose.
 
 # state.items — two kinds
-1. GROUNDED (default): `selector` copied VERBATIM from a component's `dom_selector` / `member_selector`
-   — never invented. The host keeps its `complete` flag live from the real DOM; you only display it.
-2. MANUAL: no `selector`, and `"manual": true`. For page CONTENT the DOM can't report done-ness for —
-   recipe steps, sections to read. Derive the `label` from the page text. The host does NOT touch a
-   manual item's `complete`; YOUR code owns it (see CODE CONTRACT).
-Pick per item based on what the page actually offers. A form → grounded items. A recipe with no
-inputs and a "step tracker" preference → manual items, one per step, in order. Don't invent grounded
-selectors to force everything into kind 1. If nothing fits either, show a short status message.
+1. GROUNDED (default): `selector` (one control) or `selectors` (more than one — see below), copied
+   VERBATIM from a component's `dom_selector` / `member_selectors` — never invented. The host keeps
+   its `complete` flag live from the real DOM; you only display it.
+2. MANUAL: no `selector`/`selectors`, and `"manual": true`. For page CONTENT the DOM can't report
+   done-ness for — recipe steps, sections to read. Derive the `label` from the page text. The host
+   does NOT touch a manual item's `complete`; YOUR code owns it (see CODE CONTRACT).
+
+# CHOOSING THE SOURCE, PER ITEM
+The task representation and the page text describe the same page from different angles — form
+structure vs. readable prose. Decide per item, not once for the whole page:
+- A preference that maps to a real, trackable component → GROUNDED, every time. It's host-verified
+  from the live DOM and needs no manual upkeep from the user; never fall back to a manual item (or to
+  paraphrasing the field from page text) when a real control for it exists.
+- A preference about page CONTENT with no control behind it at all (a recipe's steps, an article's
+  sections, a job posting's key requirements or deadline, a "what to do next" list) → MANUAL, derived
+  from page text. There is nothing to ground a selector on, so this is the only way to track it.
+- The two kinds coexist freely on ONE page when the preferences call for both — e.g. a job-application
+  page can get a GROUNDED checklist for its form fields AND a MANUAL callout of key requirements pulled
+  from the job description prose, at the same time. Don't force one to stand in for the other.
+- No page text available → everything must come from the task representation; don't fabricate content.
+- Neither source offers anything for a stated preference → say so with a short status message rather
+  than inventing a selector or content that isn't really there.
+
+When a component's `member_selectors` bundle more than one control for ONE question (first + last
+name; street + city + state + zip; a phone number's country-code picker + number), use
+`selectors: [...]` listing every one of them — not `selector` (singular) naming just one. The host
+requires ALL listed selectors filled before the item counts as complete. A single selector can only
+ever reflect the ONE control it names, so it reads the item done the moment that one part fills while
+the rest are still empty — don't assume one of the controls is a decorative/pre-filled default you can
+skip; that isn't reliably true (e.g. a country-code picker is not guaranteed to start pre-filled).
 
 # CODE CONTRACT
 - Assign `window.render = function(state) {...}` and nothing else at the top level.

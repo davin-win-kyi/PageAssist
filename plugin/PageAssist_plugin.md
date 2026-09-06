@@ -43,7 +43,11 @@ The orchestrator. It:
   database (list / save / activate / delete; searchable, with a per-entry emoji + colour accent
   derived from its id).
 - On explicit **activate** or **agree-in-chat**, calls `POST /webpage-interfaces/{id}/generate` and
-  pushes the result to the content script.
+  pushes the result to the content script. A chat turn only re-triggers this when the returned
+  `interface_representation` actually differs (by value) from the tree last generated from
+  (`appliedTreeJsonRef`) — `agreed` stays true across many later turns (e.g. "looks good", "save it"),
+  and the model doesn't always send `null` on a turn that isn't itself an edit, so this catches an
+  unchanged tree client-side rather than flashing "Applying the change to the page…" for nothing.
 - Listens for `PAGE_CHANGED` messages: a *structural* one (a field element entered/left the DOM) while
   a widget is showing **patches** the task representation with just the added/removed fields
   (`POST /task-representations/{id}/patch` — fast) then regenerates the widget, falling back to a full
@@ -66,8 +70,16 @@ The page-side agent. Four jobs:
    (`mutationsIncludeFieldChange`, ignoring anything inside an open dropdown/popover). A react-select
    expanding/collapsing adds only `listbox`/`option` nodes, and a plain click/focus adds nothing — so
    neither reaches the structural pipeline at all. `structural` is then confirmed by diffing
-   `currentFieldSet()` against the last snapshot. (Completion state has its own instant, un-debounced
-   `input`/`change`/`click` listeners — see step 4.)
+   `currentFieldSet()` against the last snapshot. That set counts real controls
+   (`input`/`select`/`textarea` + role-bearing widgets) and `fieldset`/`legend` groups — **not** bare
+   `<label>`s: a label is a control's accessible name, not a field, and counting them made a
+   file-upload widget swapping its "Attach / Dropbox / Google Drive / Enter manually" caption labels
+   for a "&lt;filename&gt; ×" chip read as fields being removed. A `legend`/`fieldset` with no id/name
+   is keyed by its own text rather than a freshly-stamped `data-tw-ref`, so a framework discarding and
+   rebuilding the SAME group (identical text) doesn't read as "removed, then added". Even when a change
+   does look structural, the panel's `/patch` call can still come back `changed: false` (a cosmetic DOM
+   swap that never touched a real component) and skip regenerating the widget — see the backend README.
+   (Completion state has its own instant, un-debounced `input`/`change`/`click` listeners — see step 4.)
 3. **Host the widget** — creates the sandboxed iframe (`sandbox.html`) and posts the widget's `code`
    and `state` into it. Draws **no chrome of its own**.
 4. **Keep live state accurate** — a second, un-debounced set of listeners re-reads each tracked
@@ -83,10 +95,13 @@ or navigate the top frame. `fetch` / `XMLHttpRequest` / `WebSocket` / `window.op
 
 The generated code must assign `window.render = function(state) { ... }` and nothing else at the top
 level. `render(state)` is re-called on every state change and must be idempotent (reset
-`document.body` at the start of each call). `state.items` are either **grounded** (a `selector`; the
-host keeps `item.complete` live from the DOM — the widget only shows it) or **manual**
-(`manual: true`, no selector — a recipe step / section; the widget renders a checkbox and owns its
-checked state, `liveifyState` leaves it alone).
+`document.body` at the start of each call). `state.items` are either **grounded** — a single
+`selector`, or `selectors: [...]` when the item is one question answered by more than one control
+(first + last name, a split address); `isItemComplete()` requires every listed selector to resolve
+and be individually complete before the item counts as done, so a bundled question can't read
+complete off just its first control — and the host keeps `item.complete` live from the DOM either
+way, the widget only shows it — or **manual** (`manual: true`, no selector/selectors — a recipe step
+/ section; the widget renders a checkbox and owns its checked state, `liveifyState` leaves it alone).
 
 ## Messaging
 

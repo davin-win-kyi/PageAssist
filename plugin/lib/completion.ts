@@ -200,3 +200,22 @@ export function isElementComplete(
   // A genuine button/link (or a wrapper with nothing filled inside) — did the user activate it?
   return interacted.has(selector);
 }
+
+// A checklist item grounded on MULTIPLE required controls (a widget item's `selectors: string[]` — a
+// full name split into first/last, a full address) is complete only when EVERY one of them is. A
+// single missing control (an empty Last Name next to a filled First Name) must not read as done —
+// that was the bug: one selector per item could only ever track one of several required parts.
+// `resolve` looks a selector up to a live Element (deepQuerySelector on the real page); a selector
+// that no longer resolves counts as incomplete, same as isElementComplete's own missing-selector case.
+export function isItemComplete(
+  selectors: string[],
+  resolve: (selector: string) => Element | null,
+  baselines?: Map<string, string>,
+  interacted: ReadonlySet<string> = EMPTY_SET,
+): boolean {
+  if (selectors.length === 0) return false;
+  return selectors.every((selector) => {
+    const element = resolve(selector);
+    return !!element && isElementComplete(element, selector, baselines, interacted);
+  });
+}

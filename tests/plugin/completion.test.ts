@@ -9,7 +9,7 @@ for (const k of ['window', 'document', 'Element', 'Node', 'HTMLElement', 'HTMLIn
   (globalThis as Record<string, unknown>)[k] = (dom as Record<string, unknown>)[k];
 }
 
-const { isElementComplete, enclosingChoiceWidget } = await import('../../plugin/lib/completion.ts');
+const { isElementComplete, enclosingChoiceWidget, isItemComplete } = await import('../../plugin/lib/completion.ts');
 
 let pass = 0;
 let fail = 0;
@@ -80,7 +80,8 @@ function fieldSet(body: Element): Set<string> {
   const els = [...body.querySelectorAll(PAGE_ELEMENT_SELECTOR)].filter((e) => !e.closest?.(POPUP_SELECTOR));
   return new Set(
     els
-      .filter((e) => ['input', 'textarea', 'select', 'label', 'fieldset', 'legend'].includes(e.tagName.toLowerCase())
+      // No 'label' — a <label> is a control's accessible name, not a field of its own (see page-scan.ts).
+      .filter((e) => ['input', 'textarea', 'select', 'fieldset', 'legend'].includes(e.tagName.toLowerCase())
         || FIELD_ROLES.has(e.getAttribute('role') || ''))
       .map((e, i) => e.id || e.getAttribute('for') || `${e.tagName}#${i}`),
   );
@@ -117,7 +118,7 @@ console.log('\n== 2. structural change detection ==');
     diff(base, fieldSet(frag(EMPTY + openMenu))).structural, false);
   const afterRace = diff(base, fieldSet(frag(EMPTY + raceField)));
   check('a revealed "race" field IS structural', afterRace.structural, true);
-  check('  and reports fieldsAdded = 2 (label + combobox input)', afterRace.added, 2);
+  check('  and reports fieldsAdded = 1 (the combobox input; the <label> does not count)', afterRace.added, 1);
 }
 
 // ---------------------------------------------------------------------------------------------------
@@ -177,6 +178,36 @@ console.log('\n== 4. phone field next to a defaulted country dropdown ==');
   // The country dropdown itself, grounded on its own container, IS complete (it has a value).
   const country = frag(phoneFieldset('')).querySelector('#phone-fs .select__container')!;
   check('the country dropdown (its own container) -> complete', isElementComplete(country, '.select__container'), true);
+}
+
+// ---------------------------------------------------------------------------------------------------
+// 5. Multi-selector items (state.items[].selectors) — a bundled question ("First & Last Name") is
+//    only complete once EVERY required control is, not just whichever one the model listed first.
+// ---------------------------------------------------------------------------------------------------
+console.log('\n== 5. multi-selector item (first + last name) ==');
+{
+  const nameForm = (first: string, last: string) => frag(`
+    <label for="first_name">First Name</label><input id="first_name" type="text" value="${first}" />
+    <label for="last_name">Last Name</label><input id="last_name" type="text" value="${last}" />`);
+  const resolve = (root: Element) => (selector: string) => root.querySelector(selector);
+
+  const onlyFirst = nameForm('Davin', '');
+  check('first filled, last empty -> item NOT complete (the actual reported bug)',
+    isItemComplete(['#first_name', '#last_name'], resolve(onlyFirst)), false);
+
+  const bothFilled = nameForm('Davin', 'Winkyi');
+  check('both filled -> item complete',
+    isItemComplete(['#first_name', '#last_name'], resolve(bothFilled)), true);
+
+  const neitherFilled = nameForm('', '');
+  check('neither filled -> item NOT complete',
+    isItemComplete(['#first_name', '#last_name'], resolve(neitherFilled)), false);
+
+  check('a selector that fails to resolve -> item NOT complete',
+    isItemComplete(['#first_name', '#missing'], resolve(bothFilled)), false);
+
+  check('empty selector list -> not complete (caller should use a manual item instead)',
+    isItemComplete([], resolve(bothFilled)), false);
 }
 
 console.log(`\n== RESULT ==\n  ${pass} passed, ${fail} failed`);

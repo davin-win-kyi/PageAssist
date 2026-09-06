@@ -75,7 +75,7 @@ package, state modules) is distinct from `backend/data/` (runtime JSON, resolved
 |---|---|
 | `GET /health` | liveness |
 | `POST /task-representations/{site_id}/analyze` | build this page's task representation from its real elements; replaces the single stored slot. Body may include `page_text` (the page's readable prose), stored for widget generation. |
-| `POST /task-representations/{site_id}/patch` | fast path — splice just-added fields in / drop removed ones (small model + deterministic fallback) instead of re-modelling; returns the full updated representation |
+| `POST /task-representations/{site_id}/patch` | fast path — splice just-added fields in / drop removed ones (small model + deterministic fallback) instead of re-modelling; returns the full updated representation plus `changed: bool` (false when the flagged DOM change turned out cosmetic — nothing was actually added/removed) |
 | `GET /task-representations/{site_id}` | read the stored task representation (404 if it's for another site) |
 | `GET /interface-representation` | the active preference tree + `agreed` flag |
 | `POST /interface-representation/reset` | blank the active tree, clear `agreed`, truncate `chat_log.jsonl` |
@@ -122,15 +122,44 @@ requests). `max_tokens` is 32000 for all three.
 Used by `analyze` (validates against `TaskRepresentationOut`) and `/chat` (`ChatDecision`).
 `webpage-interfaces/generate` uses forced tool-use without the retry loop (its output is executable
 code, not a closed schema); its user message is a labelled block (preferences, task representation,
-and — when stored — the page's `page_text`). Widget `state.items` may be **grounded** (a `selector`;
-host tracks `complete` from the DOM) or **manual** (`manual: true`, no selector; a recipe step / a
-section — the widget owns its checked state, the host never touches it).
+and — when stored — the page's `page_text`). Widget `state.items` may be **grounded** — a single
+`selector`, or `selectors: [...]` when the item tracks a question answered by more than one control
+(first + last name, a split address); the host requires ALL listed selectors filled before the item
+counts complete, since one selector can only ever reflect one part of a multi-control answer — and
+host tracks `complete` from the DOM either way — or **manual** (`manual: true`, no selector/selectors;
+a recipe step / a section — the widget owns its checked state, the host never touches it).
+
+Because this call has no validation-retry loop, the model isn't always trusted to pick `selectors`
+correctly on its own — `build_webpage_interface` runs `enforce_bundled_selectors()` over the returned
+`state.items` afterward, which re-derives each component's real bundling straight from the task
+representation's `member_selectors` and upgrades any item naming only ONE member of a bundle (via
+`selector`, or an under-filled `selectors`) to the full member list. This makes it irrelevant which
+single control the model happened to ground on — e.g. a phone number's country-code picker vs. the
+number itself — since the item ends up requiring every member either way. (There's no reliable way to
+tell in advance which member is a genuinely pre-filled default; a country-code picker isn't guaranteed
+to start with one — Greenhouse's own phone widget ships it blank — so the safer rule is to just require
+all of them.)
+
+`member_selectors` is "the key nodes in this component" (see `definitions/task/schema.py`), NOT
+"the controls that must each be filled" — it routinely also carries the component's own `<label>`
+(a near-universal `aria-labelledby` pattern gives the label its own id, e.g. `#first_name-label`
+beside `#first_name`) plus description/error/help text nodes. `_looks_control_like()` (used by both
+`enforce_bundled_selectors` and the fallback's `components_to_items`) excludes an id containing
+`label`/`legend`/`description`/`error`/`hint`/`help`/`message`/`caption` before counting what's left
+as a real control — otherwise a plain single-field component's own label id reads as a second
+"required" control that, being a `<label>`, can never complete, and the item locks incomplete forever
+no matter what the user types. (This is exactly what happened before this exclusion existed: adding
+`enforce_bundled_selectors` broke live completion for ordinary text fields site-wide.)
 
 `/task-representations/{id}/patch` uses `get_fast_client_and_model()` (`ANTHROPIC_MODEL_FAST`, else
 `ANTHROPIC_MODEL`) with a tiny prompt that returns **only the new component(s)** for a few
-just-appeared elements; the router splices them in (and drops components for removed selectors),
-re-ids to avoid collisions, and links them to the primary task. Deterministic fallback: one
-`field-group` component per new control.
+just-appeared elements (told to return an empty list when they aren't task-relevant); the router
+splices them in (and drops components for removed selectors), re-ids to avoid collisions, and links
+them to the primary task. Deterministic fallback: one `field-group` component per new control.
+`_remove_components` reports how many EXISTING components it actually dropped — a UI-only DOM swap
+inside an already-modelled question (a file-upload button row replaced by a "&lt;filename&gt; ×"
+chip) almost never matches a real component's selector, so `changed` comes back `false` and the panel
+skips regenerating the widget instead of claiming an update happened for nothing.
 
 ### Task representation specifics
 
@@ -141,7 +170,9 @@ re-ids to avoid collisions, and links them to the primary task. Deterministic fa
 - **The form-question rule** (from the prompt): every individual form question is its **own**
   component — never bundled with adjacent questions — because per-field completion tracking targets
   components individually. Only genuine sub-parts of one answer combine (street + city + state + zip →
-  one address).
+  one address). When a component's `member_selectors` do bundle more than one control this way, the
+  webpage-interface guide picks `selectors: [...]` over a single `selector` for that item (see above) —
+  otherwise the checklist would read the whole question done the moment just one part was filled.
 - **Grounding.** Every `dom_selector` / `member_selector` is copied verbatim from an input node;
   prefer `visible` nodes; never assert a value, completion, or "required" without a visible marker.
   Completion is read live by the content script — there are no model-asserted status fields.
@@ -156,6 +187,8 @@ re-ids to avoid collisions, and links them to the primary task. Deterministic fa
 - `analyze` → one `form-completion` task plus one `field-group` component per real form control, up
   to 40 — so a failure still yields a per-field-granular model.
 - `/chat` → a fixed "can't reach the assistant" reply, no tree change.
-- `generate` → a hand-written widget listing one row per component with live checkmarks. It carries
+- `generate` → a hand-written widget listing one row per component with live checkmarks
+  (`components_to_items`; emits `selectors: [...]` instead of `selector` for a component whose
+  `member_selectors` has more than one control-like entry, same rule as the model path). It carries
   `degraded: true` and its own "couldn't build the support" note, so the panel tells the user
   generation failed rather than showing it as a normal result.

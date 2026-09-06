@@ -37,4 +37,6 @@ node tests/plugin/structural.test.ts
   `handlePageChange` diffs; and `mutationsIncludeFieldChange`, the MutationObserver gate) against the
   Greenhouse EEO form: answering "Are you Hispanic/Latino?" reveals a `race` field and that must
   register as a structural change; merely opening/closing a react-select dropdown (menu/listbox/option
-  nodes, value text) must not reach the structural pipeline at all.
+  nodes, value text) must not reach the structural pipeline at all; and a file-upload widget swapping
+  its "Attach / Dropbox / …" caption labels for a "&lt;filename&gt; ×" chip (a bare `<label>` is not a
+  tracked field) must not read as structural.

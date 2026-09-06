@@ -71,20 +71,88 @@ async def model_webpage_interface(
         return None
 
 
+# `member_selectors` is "the key nodes in this component" (see definitions/task/schema.py), NOT
+# "the controls that must each be filled" — it routinely includes the component's own <label> (a
+# near-universal aria-labelledby pattern gives it its own id, e.g. id="first_name-label" beside
+# id="first_name"), plus description/error/help text nodes. A bare "#" (any id) or "input"/"select"/
+# "textarea" substring check can't tell those apart from a real second control, and a <label> can
+# never read as "filled" — so treating it as one wrongly locks the item incomplete forever. Exclude
+# selectors whose id names this kind of scaffolding before counting what's left as control-like.
+_NON_CONTROL_ID_HINTS = ("label", "legend", "description", "-desc", "help", "error", "hint", "message", "caption")
+def _looks_control_like(selector: str) -> bool:
+    lowered = selector.lower()
+    if any(t in lowered for t in ("input", "select", "textarea")):
+        return True
+    if "#" in selector:
+        return not any(hint in lowered for hint in _NON_CONTROL_ID_HINTS)
+    return False
+
+
+def _bundled_selector_groups(task_representation: dict[str, Any]) -> dict[str, list[str]]:
+    """Map every control-like selector to the full sibling list of control-like selectors in its
+    component, for each component whose `member_selectors` bundle more than one control. A selector
+    belonging to a single-control component has no entry."""
+    groups: dict[str, list[str]] = {}
+    for component in task_representation.get("components", []):
+        members = [s for s in component.get("member_selectors", []) if isinstance(s, str)]
+        control_like = [s for s in members if _looks_control_like(s)]
+        if len(control_like) > 1:
+            for selector in control_like:
+                groups[selector] = control_like
+    return groups
+
+
+def enforce_bundled_selectors(items: list[dict[str, Any]], task_representation: dict[str, Any]) -> list[dict[str, Any]]:
+    """The prompt asks the model to use `selectors: [...]` (not a single `selector`) for an item that
+    answers one question via more than one required control (first + last name; a phone number's
+    country + number) — but this call has no schema-validation retry loop (its output is executable
+    code, not a closed schema), so the model doesn't always comply, and when it picks a single control
+    to ground on there's no way to know in advance whether it picked the genuinely-answered one or an
+    auxiliary one with a quietly-defaulted value (a country-code picker isn't reliably pre-filled —
+    e.g. Greenhouse's own phone widget ships it blank). Re-derive the grouping straight from the task
+    representation's own `member_selectors` (data we already trust) and upgrade any item naming ONE
+    member of a bundle to `selectors` naming every member of that bundle — this makes which single
+    control the model happened to pick irrelevant, since the item now requires all of them regardless."""
+    groups = _bundled_selector_groups(task_representation)
+    fixed: list[dict[str, Any]] = []
+    for item in items:
+        if not isinstance(item, dict) or item.get("manual"):
+            fixed.append(item)
+            continue
+        selector = item.get("selector") if isinstance(item.get("selector"), str) else None
+        selectors = [s for s in item.get("selectors", []) if isinstance(s, str)] if isinstance(item.get("selectors"), list) else []
+        bundle = next((groups[s] for s in ([selector] if selector else []) + selectors if s in groups), None)
+        if bundle:
+            item = {k: v for k, v in item.items() if k != "selector"}
+            item["selectors"] = bundle
+        fixed.append(item)
+    return fixed
+
+
 def components_to_items(task_representation: dict[str, Any], limit: int = 20) -> list[dict[str, Any]]:
     """One tracked item per component (each form question is its own component), using the best
-    form-control-ish selector available and the component's own label."""
+    form-control-ish selector(s) available and the component's own label. When a component genuinely
+    bundles more than one control (a first+last name pair, a split address — see the guide's
+    form-question exception), track ALL of them via `selectors` rather than picking just one; a
+    single selector can only ever reflect one part of a multi-control answer."""
     items: list[dict[str, Any]] = []
     seen: set[str] = set()
     for component in task_representation.get("components", []):
         members = [s for s in component.get("member_selectors", []) if isinstance(s, str)]
-        selector = next((s for s in members if any(t in s for t in ("input", "select", "textarea", "#"))), None)
-        selector = selector or component.get("dom_selector") or (members[0] if members else None)
-        if not selector or selector in seen:
-            continue
-        seen.add(selector)
-        label = (component.get("label") or component.get("semantic_role") or "element").strip()
-        items.append({"selector": selector, "label": label[:80]})
+        control_like = [s for s in members if _looks_control_like(s)]
+        label = (component.get("label") or component.get("semantic_role") or "element").strip()[:80]
+        if len(control_like) > 1:
+            key = "|".join(control_like)
+            if key in seen:
+                continue
+            seen.add(key)
+            items.append({"selectors": control_like, "label": label})
+        else:
+            selector = control_like[0] if control_like else (component.get("dom_selector") or (members[0] if members else None))
+            if not selector or selector in seen:
+                continue
+            seen.add(selector)
+            items.append({"selector": selector, "label": label})
         if len(items) >= limit:
             break
     return items
@@ -119,7 +187,11 @@ async def build_webpage_interface(
 ) -> dict[str, Any]:
     """The model result if it succeeds, otherwise the deterministic fallback (which carries
     `degraded: True`)."""
-    return (
+    widget = (
         await model_webpage_interface(interface_representation, task_representation, page_text)
         or fallback_webpage_interface(interface_representation, task_representation, page_text)
     )
+    items = widget.get("state", {}).get("items")
+    if isinstance(items, list):
+        widget["state"]["items"] = enforce_bundled_selectors(items, task_representation)
+    return widget

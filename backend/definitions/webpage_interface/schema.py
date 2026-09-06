@@ -32,17 +32,18 @@ WEBPAGE_INTERFACE_TOOL = {
                         "items": {
                             "type": "object",
                             "properties": {
-                                "selector": {"type": "string", "description": "GROUNDED item: copied verbatim from a component's dom_selector or member_selectors — never invented. Omit for a manual item."},
+                                "selector": {"type": "string", "description": "GROUNDED, single-control item: copied verbatim from a component's dom_selector or member_selectors — never invented. Omit for a manual item, or when using `selectors` instead."},
+                                "selectors": {"type": "array", "items": {"type": "string"}, "description": "Use INSTEAD OF `selector` when this ONE item tracks a question that needs MORE THAN ONE control filled in to be answered — first + last name, a full street/city/state/zip address. List every control, each copied verbatim from the component's member_selectors. The host requires ALL of them to be filled/chosen before the item counts as complete. Picking just one of several required controls (via `selector`) is wrong here — it reads as done the moment the FIRST one fills, while the rest are still empty."},
                                 "label": {"type": "string"},
                                 "manual": {"type": "boolean", "description": "True for a page-CONTENT item (a recipe step, a section) with no DOM done-state — the user toggles it and YOUR code owns its checked state; the host leaves `complete` alone. Omit/false for a grounded item."},
                             },
                             "required": ["label"],
                         },
                         "description": (
-                            "The widget's checklist. GROUNDED items have a `selector` and the host keeps their live "
-                            "\"complete\" flag in sync (filled field / clicked button); MANUAL items have `manual: true`, "
-                            "no selector, and the user toggles them. Your code shows each item's state but only "
-                            "computes it for manual ones."
+                            "The widget's checklist. GROUNDED items have `selector` (one control) or `selectors` "
+                            "(multiple controls that must ALL be filled) and the host keeps their live \"complete\" "
+                            "flag in sync; MANUAL items have `manual: true`, no selector(s), and the user toggles "
+                            "them. Your code shows each item's state but only computes it for manual ones."
                         ),
                     },
                 },

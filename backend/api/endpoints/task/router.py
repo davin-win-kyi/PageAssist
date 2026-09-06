@@ -130,10 +130,14 @@ def _next_component_id(rep: dict[str, Any]) -> int:
     return (max(nums) + 1) if nums else 1
 
 
-def _remove_components(rep: dict[str, Any], selectors: list[str]) -> None:
+def _remove_components(rep: dict[str, Any], selectors: list[str]) -> int:
+    """Drop any EXISTING component whose dom_selector/member_selectors match a departed selector.
+    Returns how many were actually dropped — a UI-only DOM swap inside an already-modelled question
+    (a file-upload button row replaced by a "<filename> x" chip) almost never matches a real
+    component's selector, so this is usually 0; the caller uses that to stay quiet."""
     gone = set(selectors)
     if not gone:
-        return
+        return 0
     kept, dropped_ids = [], set()
     for comp in rep.get("components", []):
         sels = {comp.get("dom_selector"), *comp.get("member_selectors", [])}
@@ -144,6 +148,7 @@ def _remove_components(rep: dict[str, Any], selectors: list[str]) -> None:
     rep["components"] = kept
     for task in rep.get("tasks", []):
         task["component_ids"] = [cid for cid in task.get("component_ids", []) if cid not in dropped_ids]
+    return len(dropped_ids)
 
 
 def _primary_task_id(rep: dict[str, Any]) -> str | None:
@@ -227,12 +232,18 @@ async def patch_task_representation(site_id: str, request: TaskPatchRequest) -> 
     if task_store.get("site_id") != site_id or task_store.get("task_representation") is None:
         raise HTTPException(status_code=404, detail="Analyze the page before patching it")
     rep = copy.deepcopy(task_store["task_representation"])
-    _remove_components(rep, request.removed)
+    removed_count = _remove_components(rep, request.removed)
     new_components: list[dict[str, Any]] = []
     if request.added:
         new_components = await _model_patch_components(rep, request.added) or _fallback_patch_components(rep, request.added)
     _append_components(rep, new_components)
     replace_task_store(site_id, rep, task_store.get("page_text", ""))
-    print(f"patch: +{len(new_components)} components, -{len(request.removed)} selectors "
-          f"({len(rep.get('components', []))} total)")
-    return rep
+    # `changed` = did the task representation actually gain/lose a component. A DOM change the client
+    # flagged as structural often turns out to be cosmetic (a file-upload button row swapping for a
+    # "<filename> x" chip within the SAME already-modelled question) — added elements the model correctly
+    # judged not task-relevant, or removed selectors that never belonged to a real component. The client
+    # uses this to skip regenerating the widget and stay quiet instead of claiming an update happened.
+    changed = len(new_components) > 0 or removed_count > 0
+    print(f"patch: +{len(new_components)} components, -{removed_count} selectors "
+          f"({len(rep.get('components', []))} total); changed={changed}")
+    return {**rep, "changed": changed}

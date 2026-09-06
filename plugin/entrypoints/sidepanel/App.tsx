@@ -154,6 +154,11 @@ function App() {
   // The site_id that currently has a widget on the page (set by pushWebpageInterface). A widget is
   // only ever auto-refreshed on the page it's actually showing on — never carried to a new page.
   const widgetSiteIdRef = useRef('')
+  // JSON of the interface-representation tree the on-page widget was last generated from. Guards
+  // against re-triggering "applying…" when a chat turn resends a tree unchanged (a "looks good" /
+  // save confirmation) instead of an actual edit — belt-and-suspenders alongside the prompt telling
+  // the model to send `interface_representation: null` on a turn that doesn't change it.
+  const appliedTreeJsonRef = useRef('')
   const taskRepresentationRef = useRef<TaskNode | undefined>(undefined)
   const lastAnalyzeAtRef = useRef(0)  // ms — rate-limits the "form just hydrated" re-analyze
   // A structural page change was seen since the last successful analyze → the stored task
@@ -335,7 +340,10 @@ function App() {
   // Fast path for a structural change: splice just the added/removed fields into the stored task
   // representation server-side (a small model + deterministic fallback) instead of re-modelling the
   // whole page (~30s). Returns the updated representation, or null to fall back to a full re-analyze.
-  const patchTaskRepresentation = async (added: TaskElement[], removed: string[]): Promise<TaskNode | null> => {
+  // `changed: false` means the flagged DOM change turned out cosmetic (e.g. a file-upload button row
+  // swapping for a "<filename> ×" chip within an already-modelled question) — the task representation
+  // itself didn't gain or lose a component, so there's nothing worth regenerating the widget for.
+  const patchTaskRepresentation = async (added: TaskElement[], removed: string[]): Promise<{ task: TaskNode; changed: boolean } | null> => {
     const id = siteIdRef.current
     if (!id || (added.length === 0 && removed.length === 0)) return null
     try {
@@ -345,10 +353,10 @@ function App() {
         body: JSON.stringify({ added, removed }),
       }, LLM_CALL_TIMEOUT_MS)
       if (!response.ok) return null
-      const task: TaskNode = await response.json()
+      const { changed, ...task } = await response.json() as TaskNode & { changed?: boolean }
       setTaskRepresentation(task)
       lastAnalyzeAtRef.current = Date.now()
-      return task
+      return { task, changed: changed !== false }
     } catch (error) {
       console.error('Unable to patch task representation', error)
       return null
@@ -484,15 +492,22 @@ function App() {
         // Fast path: patch just the changed fields into the stored representation. Fall back to a full
         // re-analyze if we don't have the field descriptors, or the patch call fails.
         let task: TaskNode | undefined
+        let noRealChange = false
         if (siteIdRef.current && (addedFields.length > 0 || removedFields.length > 0)) {
-          task = (await patchTaskRepresentation(addedFields, removedFields)) || undefined
+          const patched = await patchTaskRepresentation(addedFields, removedFields)
+          if (patched) { task = patched.task; noRealChange = !patched.changed }
         }
-        if (!task) {
+        if (!task && !noRealChange) {
           const site = await analyzeCurrentSite(true) // full re-model
           task = site.hasPage ? site.task : undefined
         }
         if (task) staleTaskRepRef.current = false
-        if (task && siteIdRef.current && widgetSiteIdRef.current === siteId) {
+        if (noRealChange) {
+          // The DOM change was cosmetic (e.g. a file-upload button row swapping for a "<filename> ×"
+          // chip) — the task representation didn't actually gain/lose a component. Settle quietly
+          // rather than claiming an update happened, or burning a /generate call for nothing.
+          if (hasWidget) setApplyPhase('idle')
+        } else if (task && siteIdRef.current && widgetSiteIdRef.current === siteId) {
           const { applied, degraded } = await generateWebpageInterface(siteIdRef.current)
           finishApply(applied, degraded ? DEGRADED_TEXT : '✓ Support updated for the page change.')
         } else if (hasWidget) {
@@ -583,20 +598,32 @@ function App() {
     })
       .then(response => response.ok ? response.json() : Promise.reject(new Error(`Chat failed: ${response.status}`)))
       .then(async (result: ChatResponse) => {
-        setTranscript(current => [...current, { id: `a-${current.length}-${Date.now()}`, role: 'assistant', text: result.reply, suggestions: result.suggestions, offerSave: result.offer_save, suggestedName: result.suggested_name }])
+        const pushReply = () =>
+          setTranscript(current => [...current, { id: `a-${current.length}-${Date.now()}`, role: 'assistant', text: result.reply, suggestions: result.suggestions, offerSave: result.offer_save, suggestedName: result.suggested_name }])
+        // Generate the on-page widget as soon as there's an agreed, concrete concept. `agreed` is the
+        // model's "ready to show" signal (see the prompt); `treeHasContent` guards against an empty
+        // widget if it's set a beat early. A trailing refinement question in the reply is fine.
+        // The model is told to send `interface_representation: null` on a turn that doesn't change the
+        // tree (agreed, once true, stays true on every later turn — including a plain "looks good" or
+        // "save it" that isn't itself an edit) — but re-check here too, so a resent-unchanged tree can't
+        // re-trigger "Applying the change to the page…" for nothing.
+        const treeJson = result.interface_representation ? JSON.stringify(result.interface_representation) : ''
+        const willApply = result.agreed && treeHasContent(result.interface_representation) && treeJson !== appliedTreeJsonRef.current
+        // When an apply is about to run, hold the reply back until it resolves — otherwise a reply
+        // like "Done — …" renders above a still-spinning "Applying the change to the page…", which
+        // reads as though the change already landed when it hasn't yet.
+        if (!willApply) pushReply()
         setSynced(true)
         setAgreed(result.agreed)
         if (result.interface_representation?.component !== undefined) setInterfaceComponent(result.interface_representation.component)
         if (result.interface_representation?.description) setInterfaceDescription(result.interface_representation.description)
         // Pre-fill the Saved-tab name field with the readable default so it's one click there too.
         if (result.offer_save) setSaveNameDraft(current => current || defaultSaveName(result.suggested_name))
-        // Reply is shown; the generate-and-apply step below is separate and slower, tracked by
-        // applyPhase (applying → done/failed line → clears). The composer stays disabled through it.
+        // Reply is shown (or, if willApply, will be); the generate-and-apply step is separate and
+        // slower, tracked by applyPhase (applying → done/failed line → clears). Composer stays disabled.
         setIsThinking(false)
-        // Generate the on-page widget as soon as there's an agreed, concrete concept. `agreed` is the
-        // model's "ready to show" signal (see the prompt); `treeHasContent` guards against an empty
-        // widget if it's set a beat early. A trailing refinement question in the reply is fine.
-        if (result.agreed && treeHasContent(result.interface_representation)) {
+        if (willApply) {
+          appliedTreeJsonRef.current = treeJson
           setApplyPhase('applying')
           // Generate from the page as it is NOW. Re-analyze when there's no analysis yet, or a
           // structural change has been seen since the last one — otherwise the widget is built from a
@@ -611,8 +638,10 @@ function App() {
           }
           if (id) {
             const { applied, degraded } = await generateWebpageInterface(id)
+            pushReply()
             finishApply(applied, degraded ? DEGRADED_TEXT : undefined)
           } else {
+            pushReply()
             setApplyPhase('idle')
             setTranscript(current => [...current, { id: `a-noapply-${Date.now()}`, role: 'assistant', text: "I've got the concept, but I can't read this page to show it — reload the tab and reopen this panel, then it'll apply." }])
           }
@@ -641,6 +670,7 @@ function App() {
         setInterfaceComponent('')
         setInterfaceDescription('')
         setSaveNameDraft('')
+        appliedTreeJsonRef.current = ''
         pushWebpageInterface(null)
       })
       .catch(error => console.error('Unable to reset interface representation', error))
@@ -745,6 +775,9 @@ function App() {
         setAgreed(payload.agreed)
         setInterfaceComponent(payload.tree?.component || '')
         setInterfaceDescription(payload.tree?.description || '')
+        // So a later "looks good" chat turn (if the model resends this same tree) doesn't re-trigger
+        // "Applying the change to the page…" — this activation is already applying it.
+        appliedTreeJsonRef.current = payload.tree ? JSON.stringify(payload.tree) : ''
         setActiveSourceId(item.id)
         setActiveSourceName(item.name)
         setTranscript([{ id: 'intro', role: 'assistant', text: `Switched to "${item.name}". Continue refining it, or describe something new.` }])
