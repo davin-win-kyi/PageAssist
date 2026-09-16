@@ -1,7 +1,14 @@
 # tests
 
-All tests live here, split by the part they exercise. No shared runner — each is a plain script that
-exits non-zero on the first failed assertion and prints a `[FAIL] …` line.
+All tests live here, split by the part they exercise, mirroring the top-level `backend/` / `plugin/`
+split. No shared runner and no test framework (no pytest, no vitest/jest) — each file is a plain
+script that runs the *real* production code (not a mock of it) against reconstructed real-page
+markup, prints one `[ok]`/`[FAIL]` line per assertion, and exits non-zero on the first failure.
+
+| Folder | Exercises | Run with |
+|---|---|---|
+| `backend/` | The FastAPI app in `../backend/` — every endpoint, the model-call + fallback paths | plain Python |
+| `plugin/` | The pure `lib/*.ts` modules in `../plugin/lib/` — completion detection, structural-change detection | Node + `linkedom` (a lightweight DOM, no real browser needed) |
 
 ## backend/ — plain Python (no pytest)
 
@@ -12,7 +19,9 @@ PYTHONPATH=backend backend/.venv/bin/python tests/backend/structural_update_test
 
 - **full_flow_test.py** — every endpoint once: health, analyze, GET task rep, interface reset,
   /chat, save/activate the reusable database, generate + GET the widget, widget-not-persisted +
-  chat-log-truncates-on-reset.
+  chat-log-truncates-on-reset, and `enforce_bundled_selectors` (the widget-generation router's
+  deterministic correction of a `selectors: [...]` bundle — including the label-id false-positive
+  regression, and the model-can't-be-trusted-to-pick-the-right-control case).
 - **structural_update_test.py** — a revealed field (answering "Are you Hispanic/Latino?" on the
   Greenhouse/Snorkel page reveals `#race`) must flow into the widget's `state.items`, via both the
   full re-analyze path and the fast `/task-representations/{id}/patch` path (splice + regenerate,

@@ -5,12 +5,16 @@ difficulty you have with a page; TaskWeb helps you shape a reusable support conc
 as a small widget grounded in that page's real elements — a live checklist, a progress tracker, a
 "what's left" panel, whatever you and the assistant land on.
 
-It has two parts, each with its own README:
+## Folders, at a glance
 
-| Part | Stack | README |
+| Folder | Purpose | README |
 |---|---|---|
-| `plugin/` | Chrome extension — WXT + React (side panel, content script, sandboxed widget) | [plugin/PageAssist_plugin.md](plugin/PageAssist_plugin.md) |
-| `backend/` | FastAPI + Claude — `api/` = `endpoints/<domain>/` + `data/` + `utils/`; `definitions/<domain>/` = prompts.py + schema.py | [backend/PageAssist_backend.md](backend/PageAssist_backend.md) |
+| `plugin/` | The Chrome extension a user actually installs — WXT + React. Reads the page, chats with the backend, and hosts the generated widget on the page in a sandboxed iframe. | [plugin/PageAssist_plugin.md](plugin/PageAssist_plugin.md) |
+| `backend/` | FastAPI + Claude service. Turns a page's real elements plus a user's chat-shaped preferences into the concrete widget the plugin displays. `api/` = `endpoints/<domain>/` (routes) + `state/` (in-process data) + `utils/` (shared infra); `definitions/<domain>/` = `prompts.py` + `schema.py` (what the model is told, no behavior). | [backend/PageAssist_backend.md](backend/PageAssist_backend.md) |
+| `tests/` | All tests for both halves, run as plain scripts (no pytest/vitest) against the real production code. | [tests/PageAssist_Tests.md](tests/PageAssist_Tests.md) |
+
+Each of those has its own README with the full file-by-file breakdown — this one stays at the
+system level: what the three representations are, and how a request flows end to end.
 
 ## The three representations
 

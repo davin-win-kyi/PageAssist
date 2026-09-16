@@ -1,8 +1,9 @@
 """TaskWeb API — thin assembly point.
 
 - api/endpoints/    — the four FastAPI routers (one module per domain)
-- api/data/         — in-process state (task slot, interface working-tree + saved DB, in-memory widget)
-- api/utils/        — shared infra: JSON persistence, Anthropic plumbing, debug logs
+- api/state/        — in-process state: getters/setters for the task representation, the interface
+                      representation (working tree + saved DB), and the generated webpage interface
+- api/utils/        — JSON persistence, Anthropic plumbing, debug logs
 - definitions/      — the prompt(s) + schemas for each domain (no behavior)
 """
 from pathlib import Path

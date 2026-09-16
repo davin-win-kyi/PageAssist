@@ -1,11 +1,13 @@
-"""Shared JSON persistence. Each domain package keeps its own store module (task/store.py,
-interface_representation/store.py) and uses these to read/write a file under backend/data/."""
+"""
+Util methods for JSON files
+"""
+
 from pathlib import Path
 from typing import Any
 import json
 
 # backend/data/ (runtime JSON) — this file is at backend/api/utils/json_store.py, so parents[2] is
-# backend/. Not to be confused with the api/data/ package (in-process state modules).
+# backend/. Not to be confused with the api/state/ package (in-process state modules).
 DATA_DIR = Path(__file__).resolve().parents[2] / "data"
 DATA_DIR.mkdir(exist_ok=True)
 

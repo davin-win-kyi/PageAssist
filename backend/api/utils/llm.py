@@ -1,12 +1,7 @@
-"""Anthropic client plumbing shared by every model-backed endpoint.
-
-- `get_client_and_model()` — the api-key/model env lookup all call sites used to duplicate.
-- `create_message()` — a streaming `messages.create`. Streaming is mandatory once `max_tokens` is
-  large enough that the worst case could exceed 10 min (the SDK hard-errors otherwise), which our
-  big task-representation / widget outputs hit.
-- `call_structured_tool()` — forced tool-use + typed validation + retry-on-validation-error, so a
-  "nearly right" tool call becomes an "always right" one instead of silently falling back.
 """
+Util methods to antrophic API
+"""
+
 from typing import Any, Callable
 import os
 from anthropic import AsyncAnthropic

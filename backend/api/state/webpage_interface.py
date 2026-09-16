@@ -1,5 +1,7 @@
-"""The current webpage interface — IN MEMORY ONLY, never written to disk. Cheap to regenerate;
-only meaningful while the client that asked for it is still on the page."""
+"""
+Getter and setter methods for webpage interface
+"""
+
 from typing import Any
 
 

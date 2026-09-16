@@ -1,10 +1,7 @@
-"""Persistent state for the interface side, plus the active-tree accessors.
+"""
+Interface representation getter and setter functions.
+These are used to store and retrive the interface representation tree in a JSON file.
 
-`interface_store` = {active_tree, active_agreed, representations{}}.
-- One "active" tree at a time (what /chat edits); it is NOT itself a saved entry.
-- Saved entries form a reusable database — any can be activated onto a different site later.
-- `active_agreed` is a one-way latch: only /chat (on real agreement) or activating a saved entry
-  sets it true; only reset clears it. It gates whether support may ever show on a real page.
 """
 from typing import Any
 
@@ -20,9 +17,6 @@ def save_interface_store() -> None:
 
 
 def default_interface_representation() -> dict[str, Any]:
-    # "component" starts empty; /chat names it once a concept is chosen (e.g. "checklist").
-    # "description" is the human-readable "what/why", set once the concept is concrete.
-    # "preferences" is a list of short page-agnostic phrases (was "content").
     return {"component": "", "description": "", "style": {}, "preferences": [], "children": []}
 
 

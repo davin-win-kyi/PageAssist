@@ -60,7 +60,7 @@ for key in ("page_purpose", "page_type", "tasks", "components", "modeling_notes"
 check("analyze dropped example_difficulties", "example_difficulties" not in tr)
 check("tasks is list", isinstance(tr.get("tasks"), list))
 check("components is list", isinstance(tr.get("components"), list))
-from api.data.task import task_store as _ts
+from api.state.task import task_store as _ts
 check("analyze stored page_text for generation", _ts.get("page_text", "").startswith("Apply for Senior Engineer"))
 
 given = {e["selector"] for e in PAGE["elements"]}

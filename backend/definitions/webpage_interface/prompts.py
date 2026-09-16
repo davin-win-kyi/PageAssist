@@ -1,4 +1,6 @@
-"""WEBPAGE_INTERFACE_GUIDE — realize an interface representation into a widget for one page."""
+"""
+Webpage interface prompt
+"""
 
 WEBPAGE_INTERFACE_GUIDE = """\
 # ROLE

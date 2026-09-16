@@ -1,4 +1,6 @@
-"""TASK_REPRESENTATION_GUIDE — the analyze system prompt."""
+"""
+Task representation prompt
+"""
 
 TASK_REPRESENTATION_GUIDE = """\
 # ROLE

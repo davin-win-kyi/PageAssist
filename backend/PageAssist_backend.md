@@ -28,68 +28,114 @@ deterministic fallback, so the service still runs end to end.
 
 CORS is open to `http://localhost:5173` (the WXT dev origin).
 
-## Layout
+## Folders, at a glance
+
+| Folder | Purpose |
+|---|---|
+| `api/endpoints/` | The FastAPI routes themselves — one package per domain (`task`, `chat`, `interface_representation`, `webpage_interface`). This is the only layer that knows about HTTP (request/response shapes, status codes). |
+| `api/state/` | In-process state — plain module-level dicts that get mutated in place, plus the getters/setters around them. This is "what the backend currently believes about the world" (the current page's task representation, the working + saved interface representations, the last-generated widget). Deliberately **not** called `data/` — that name collided with `backend/data/` (the runtime JSON files below), which is a different thing. |
+| `api/utils/` | Shared infrastructure with no domain knowledge: JSON file persistence, the Anthropic client + structured-tool-call helper, append-only debug logs. |
+| `definitions/` | The prompt text and Pydantic/JSON-schema definitions for each domain — pure data, no behavior. This is where you go to change what the model is told or what shape it must answer in. |
+| `data/` | Runtime JSON files (git-ignored) — the on-disk form of `api/state/`'s in-memory dicts, so state survives a server restart. **Not** the `api/state/` package — same word, different folder, see above. |
+
+Three layers under `api/`: **endpoints** (HTTP surface), **state** (in-process data), **utils**
+(infra with no domain knowledge). Each `api/endpoints/<domain>/` and `definitions/<domain>/`
+re-exports from its `__init__.py`, so callers write `from api.endpoints import task` and
+`from definitions.task import TASK_REPRESENTATION_GUIDE, ...`.
+
+## Layout — what each file is
 
 ```
 backend/
   main.py                     FastAPI app: mounts the 4 routers, /health
   api/
     endpoints/                one package per domain (each __init__ re-exports `router`)
-      task/router.py          POST /task-representations/{id}/analyze, GET
-      chat/router.py          POST /chat
-      interface_representation/router.py   /interface-representation(s) — working tree + saved DB CRUD
-      webpage_interface/       router.py (routes + the model call + fallback), fallback_widget.js
-    data/                     in-process state (mutated in place, never rebound)
-      task.py                 task_store (the single current-webpage slot) + persistence
+      task/router.py                        POST /task-representations/{id}/analyze, /patch, GET
+      chat/router.py                        POST /chat
+      interface_representation/router.py    /interface-representation(s) — working tree + saved DB CRUD
+      webpage_interface/router.py           generate/GET a widget; the model call + fallback + selector
+                                             enforcement live in this same file
+      webpage_interface/fallback_widget.js  hand-written widget JS, used when the model call fails
+    state/                     in-process state (mutated in place, never rebound — see Folders above)
+      task.py                       task_store (the single current-webpage slot) + persistence
       interface_representation.py   interface_store + active-tree accessors + persistence + default tree
-      webpage_interface.py    the current widget — IN MEMORY ONLY (never persisted)
-    utils/                    shared infra used across domains
-      json_store.py           shared JSON load/dump + points at backend/data/
-      llm.py                  Anthropic client, streaming create, call_structured_tool()
-      debuglog.py             append-only JSONL logs under backend/data/ (+ truncate_jsonl)
+      webpage_interface.py          the current widget — IN MEMORY ONLY (never persisted)
+    utils/                     shared infra used across domains
+      json_store.py                  shared JSON load/dump + points at backend/data/
+      llm.py                         Anthropic client, streaming create, call_structured_tool()
+      debuglog.py                    append-only JSONL logs under backend/data/ (+ truncate_jsonl)
   definitions/                prompts + schemas per domain — NO behavior. one prompts.py + schema.py each
-    task/        prompts.py (TASK_REPRESENTATION_GUIDE)   schema.py (models + tool input_schema)
-    chat/        prompts.py (TASKWEB_GUIDE)                schema.py (Chat* models + tool)
-    interface_representation/   schema.py (SaveInterfaceRepresentationRequest); prompts.py is a stub (no prompt)
-    webpage_interface/  prompts.py (WEBPAGE_INTERFACE_GUIDE)   schema.py (the tool input_schema)
-  data/                       runtime JSON (git-ignored) — NOT the api/data/ package
+    task/prompts.py               TASK_REPRESENTATION_GUIDE — how to read a page into tasks/components
+    task/schema.py                the task representation's Pydantic models + tool input_schema
+    chat/prompts.py                TASKWEB_GUIDE — how to hold the conversation, when to set `agreed`
+    chat/schema.py                 Chat* models + the respond_and_update_interface tool
+    interface_representation/schema.py   SaveInterfaceRepresentationRequest; prompts.py is a stub (no prompt)
+    webpage_interface/prompts.py   WEBPAGE_INTERFACE_GUIDE — how to turn preferences+page into a widget
+    webpage_interface/schema.py    the build_webpage_interface tool's input_schema
+  data/                       runtime JSON (git-ignored) — NOT the api/state/ package
     task_representations.json        {site_id, task_representation, page_text}
     interface_representations.json   {active_tree, active_agreed, representations{}}
     chat_log.jsonl                   one line per /chat turn; truncated on a new chat
 ```
 
-Three layers under `api/`: **endpoints** (one package per domain, room to grow beyond a single
-`router.py`), **data** (in-process state), **utils** (shared infra). Each `api/endpoints/<domain>/`
-and `definitions/<domain>/` re-exports from its `__init__.py`, so callers write
-`from api.endpoints import task` and `from definitions.task import TASK_REPRESENTATION_GUIDE, …`.
-
-Imports: state lives in `api/data/<domain>.py`, mutated in place (never rebound), so
-`from api.data.task import task_store` stays valid after `replace_task_store()`. `chat` and
-`webpage_interface` endpoints read the active tree from `api.data.interface_representation`;
-`webpage_interface` also reads the task representation from `api.data.task`. Note `api/data/` (Python
-package, state modules) is distinct from `backend/data/` (runtime JSON, resolved by `json_store.py`).
+Imports: state lives in `api/state/<domain>.py`, mutated in place (never rebound), so
+`from api.state.task import task_store` stays valid after `replace_task_store()`. `chat` and
+`webpage_interface` endpoints read the active tree from `api.state.interface_representation`;
+`webpage_interface` also reads the task representation from `api.state.task`. Note `api/state/`
+(Python package, in-process state modules) is distinct from `backend/data/` (runtime JSON files,
+resolved by `json_store.py`) — same word "data" doesn't appear in the package name precisely to avoid
+that confusion.
 
 ## Endpoints
 
 | Method + path | Purpose |
 |---|---|
 | `GET /health` | liveness |
-| `POST /task-representations/{site_id}/analyze` | build this page's task representation from its real elements; replaces the single stored slot. Body may include `page_text` (the page's readable prose), stored for widget generation. |
-| `POST /task-representations/{site_id}/patch` | fast path — splice just-added fields in / drop removed ones (small model + deterministic fallback) instead of re-modelling; returns the full updated representation plus `changed: bool` (false when the flagged DOM change turned out cosmetic — nothing was actually added/removed) |
-| `GET /task-representations/{site_id}` | read the stored task representation (404 if it's for another site) |
-| `GET /interface-representation` | the active preference tree + `agreed` flag |
-| `POST /interface-representation/reset` | blank the active tree, clear `agreed`, truncate `chat_log.jsonl` |
-| `GET /interface-representations` | list saved, reusable entries (`{id, name}`) |
-| `POST /interface-representations` | save the active tree as a new named entry |
-| `POST /interface-representations/{id}/activate` | copy a saved entry into the active tree (counts as agreement) |
-| `POST /interface-representations/{id}/update` | write the current active tree back onto that saved entry |
-| `DELETE /interface-representations/{id}` | remove a saved entry (the working tree is untouched — just unlinked if it came from this one) |
-| `POST /chat` | conversational turn; may replace the active interface representation and/or set `agreed` |
-| `POST /webpage-interfaces/{site_id}/generate` | combine the stored task representation + active tree into a widget; hold it in memory and return it |
-| `GET /webpage-interfaces/{site_id}` | read the in-memory widget (404 after a restart, or for another site) |
+| `POST /task-representations/{site_id}/analyze` | Build this page's **task representation** from its real elements; replaces the single stored slot. Body may include `page_text` (the page's readable prose), stored for widget generation. This is the expensive, full-model call — used on first load of a page and whenever the page has changed enough that a partial patch wouldn't be trustworthy. |
+| `POST /task-representations/{site_id}/patch` | Fast path — splice just-added fields in / drop removed ones (small/fast model + deterministic fallback) instead of re-modelling the whole page. Returns the full updated representation plus `changed: bool` (false when the flagged DOM change turned out cosmetic — nothing was actually added/removed, so the caller shouldn't bother regenerating the widget). |
+| `GET /task-representations/{site_id}` | Read the stored task representation (404 if it's for another site). |
+| `GET /interface-representation` | The active **interface representation** (the working preference tree) + its `agreed` flag. |
+| `POST /interface-representation/reset` | Blank the active tree, clear `agreed`, truncate `chat_log.jsonl` — this is what "new chat" / "end chat and start over" calls. |
+| `GET /interface-representations` | List saved, reusable interface-representation entries (`{id, name}`) — the "Saved" tab's data. |
+| `POST /interface-representations` | Save the active tree as a new named entry in that reusable database. |
+| `POST /interface-representations/{id}/activate` | Copy a saved entry into the active tree (this counts as agreement — the widget can be generated from it immediately). |
+| `POST /interface-representations/{id}/update` | Write the current active tree back onto that saved entry (overwrite it with whatever chat has since refined). |
+| `DELETE /interface-representations/{id}` | Remove a saved entry. The working tree is untouched — if it came from this entry, it's just unlinked (no more "update the one I came from" offer). |
+| `POST /chat` | One conversational turn. May reply with text only, or also replace the active interface representation and/or flip `agreed` to true (the model's "this concept is concrete enough to show" signal). |
+| `POST /webpage-interfaces/{site_id}/generate` | Combine the stored task representation + the active interface representation into a **webpage interface** (a concrete, model-generated widget); hold it in memory and return it. This is the call that actually produces the thing that shows up on the page. |
+| `GET /webpage-interfaces/{site_id}` | Read the in-memory widget (404 after a restart, or for another site — nothing is regenerated automatically). |
 
 `site_id` is an opaque key the client builds from `hostname + pathname + search` (with `/` → `~`) and
 `encodeURIComponent`s into the path. Store the raw value; match on it exactly.
+
+## The three representations — what each one is for
+
+TaskWeb's whole pipeline is three progressively more concrete objects, each built from the one before
+it (see the [top-level README](../README.md) for the end-to-end picture; this section is what each one
+*is* and why it exists as its own thing rather than being folded into another).
+
+- **Task representation** (`definitions/task/`, `api/state/task.py`) — a structured model of what a
+  *specific page* is asking the user to do, grounded in its real DOM elements. Two tiers: `tasks` are
+  coarse goals ("fill out this application"), `components` are individual, per-question groupings (one
+  form field, or a genuine multi-part answer like a split address) each carrying real CSS selectors
+  (`dom_selector` / `member_selectors`) copied verbatim from the page. It exists so that everything
+  downstream — the chat, the widget — can talk about "this page's fields" without re-parsing the DOM
+  itself, and so the model never has to assert whether a field is filled (the client reads that live).
+  One page's worth lives in the store at a time; a new `site_id` replaces it.
+- **Interface representation** (`definitions/chat/`, `api/state/interface_representation.py`) — the
+  user's *page-agnostic* preferences for what kind of support they want and how it should behave (a
+  short tree: `component` slug, human-readable `description`, `style`, `preferences` phrases,
+  `children` for structural grouping). This is deliberately **not** grounded in any one page's
+  elements — it's the reusable "shape" of the support (e.g. "a checklist, docked bottom-right, one
+  item per required field") that the same user might want realized on many different sites. `/chat`
+  builds and refines it; the "Saved" tab lets a finished one be reused without re-explaining it. It has
+  a working copy (the one chat is currently shaping) and a saved database of named ones.
+- **Webpage interface** (`definitions/webpage_interface/`, `api/state/webpage_interface.py`) — the
+  concrete result of realizing one interface representation against one page's task representation:
+  actual generated JavaScript (`code`) plus its initial `state`, meant to run in the sandboxed widget
+  iframe on that specific page. This is the only one of the three that's actually shown to the user,
+  and the only one never persisted to disk — it's cheap to regenerate from the other two and only
+  meaningful while the client that asked for it is still on that page.
 
 ## State
 
@@ -100,7 +146,7 @@ package, state modules) is distinct from `backend/data/` (runtime JSON, resolved
   tree is `{component, description, style, preferences, children}`. `active_agreed` is a one-way latch
   (only `/chat` on real agreement, or activating a saved entry, sets it true; only reset clears it)
   and gates whether support may ever show on a real page.
-- **The generated widget is not persisted** — it lives in `api/data/webpage_interface.py` as a
+- **The generated widget is not persisted** — it lives in `api/state/webpage_interface.py` as a
   module global and is gone on restart. It's cheap to regenerate and only meaningful while the client
   that asked for it is still on the page.
 

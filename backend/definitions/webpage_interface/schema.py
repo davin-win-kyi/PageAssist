@@ -1,4 +1,7 @@
-"""The build_webpage_interface tool input_schema."""
+"""
+Webpage interface schema
+"""
+
 WEBPAGE_INTERFACE_TOOL = {
     "name": "build_webpage_interface",
     "description": "Produce a concrete, code-driven interface widget grounded in a specific webpage's real task representation.",

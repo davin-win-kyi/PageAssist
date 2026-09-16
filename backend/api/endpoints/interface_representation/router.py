@@ -2,7 +2,7 @@
 
 Shape: {component, description, style: {CSS prop/value}, preferences: [short phrases], children: [same]}
 
-The store + active-tree accessors live in api/data/interface_representation.py; /chat is api/endpoints/chat/.
+The store + active-tree accessors live in api/state/interface_representation.py; /chat is api/endpoints/chat/.
 """
 from typing import Any
 import copy
@@ -10,7 +10,7 @@ import uuid
 
 from fastapi import APIRouter, HTTPException
 
-from api.data.interface_representation import (
+from api.state.interface_representation import (
     interface_store,
     save_interface_store,
     default_interface_representation,

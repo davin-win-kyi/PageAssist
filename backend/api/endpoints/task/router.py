@@ -16,7 +16,7 @@ import json
 
 from fastapi import APIRouter, HTTPException
 
-from api.data.task import task_store, replace_task_store
+from api.state.task import task_store, replace_task_store
 from definitions.task import (
     TASK_REPRESENTATION_GUIDE,
     PATCH_TASK_REPRESENTATION_GUIDE,

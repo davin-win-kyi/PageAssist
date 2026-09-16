@@ -1,4 +1,7 @@
-"""Append-only JSONL debug logs under backend/data/. Best-effort — never raises into a request."""
+"""
+Util methods for chat logs 
+"""
+
 from datetime import datetime, timezone
 from typing import Any
 import json

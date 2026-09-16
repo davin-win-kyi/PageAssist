@@ -1,13 +1,7 @@
-"""Persistent state for the task side: the single current-webpage slot.
-
-`task_store` = {site_id, task_representation, page_text}. ONE page, never a history — analyzing a new
-site_id replaces it. `page_text` is the page's readable prose, kept for widget generation (a recipe
-step tracker, an article progress bar — content that isn't a form field). The generated widget is NOT
-kept here (or on disk); see api/data/webpage_interface.py.
-
-Accessed as `from api.data.task import task_store`; `replace_task_store()` mutates in place so that
-binding stays valid.
 """
+Setter and getter methods for task representation
+"""
+
 from typing import Any
 
 from api.utils.json_store import load_json, dump_json

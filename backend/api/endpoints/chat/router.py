@@ -9,7 +9,7 @@ import json
 
 from fastapi import APIRouter
 
-from api.data.interface_representation import interface_store, save_interface_store, get_active_tree, is_agreed
+from api.state.interface_representation import interface_store, save_interface_store, get_active_tree, is_agreed
 from definitions.chat import TASKWEB_GUIDE, ChatMessage, ChatRequest, ChatDecision, CHAT_DECISION_TOOL
 from api.utils.llm import get_client_and_model, call_structured_tool
 from api.utils.debuglog import append_jsonl

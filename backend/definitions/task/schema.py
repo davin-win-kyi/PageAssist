@@ -1,5 +1,7 @@
-"""Request + output schemas for /task-representations/{id}/analyze, and the tool input_schema
-(mirrors the Pydantic models; keep in sync)."""
+"""
+Task representation related schemas
+"""
+
 from __future__ import annotations
 from typing import Literal
 

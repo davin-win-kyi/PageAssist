@@ -6,9 +6,9 @@ import json
 
 from fastapi import APIRouter, HTTPException
 
-from api.data.task import task_store
-from api.data.interface_representation import get_active_tree
-from api.data.webpage_interface import get_webpage_interface, set_webpage_interface
+from api.state.task import task_store
+from api.state.interface_representation import get_active_tree
+from api.state.webpage_interface import get_webpage_interface, set_webpage_interface
 from api.utils.llm import get_client_and_model, create_message
 from definitions.webpage_interface import WEBPAGE_INTERFACE_GUIDE, WEBPAGE_INTERFACE_TOOL
 
