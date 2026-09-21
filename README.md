@@ -67,6 +67,70 @@ Everything in the system is one of three linked representations:
 - Live completion state (a checklist ticking off as you fill fields) is read straight from the DOM by
   the content script — the model never computes or represents it.
 
+## In practice
+
+A visual walkthrough of the pipeline above, the conversation that drives it, and what the result
+looks like on real pages. (Images live in `docs/assets/` — see the filenames below.)
+
+### System overview
+
+![PageAssist system figure](docs/assets/system-figure.png)
+
+The user provides a webpage. The webpage is turned into a task representation. TaskWeb uses that
+task representation along with the user's preferences to produce a webpage interface that best
+assists the user — while saving an interface representation that can be used to create webpage
+interfaces on other webpages as well.
+
+### The conversation
+
+![PageAssist conversation interface](docs/assets/conversation-flow.png)
+
+The user is first given an introduction to the system. The user then voices their task difficulty,
+and the system does its best to understand it. The user is offered options, or can author their own
+interface from scratch. The user can then refine the interface and save it once it's complete.
+
+### Task representation vs. interface representation
+
+![Interface representation and task representation](docs/assets/representation-shapes.png)
+
+The task representation best represents the current task and the elements related to that task. The
+interface representation is the best representation of the desired task-based interface *without*
+being grounded in any given webpage — which is exactly what makes it reusable and adaptable to active
+webpage changes (see the two contributions below).
+
+### Actively adapting to webpage changes
+
+![Actively adapting task interface to webpage changes](docs/assets/adapting-to-changes.png)
+
+Support is applied to a given page. An active change occurs on the webpage (here, answering "Are you
+Hispanic/Latino?" reveals a follow-up race/ethnicity question). The interface adapts to account for
+this change — without the user having to redo anything, and without a full re-analysis of the page.
+
+### Transferring a task interface to a new page
+
+![Transferring task interface](docs/assets/transferring-interface.png)
+
+An interface built for one page (a job application) is saved as a reusable interface representation.
+Because that representation was never grounded in the job page's specific fields, the same concept can
+be transferred and re-realized on a completely different page — here, a recipe site — with a widget
+grounded in *that* page's own elements instead.
+
+### Non-predefined authoring
+
+![Non-predefined authoring](docs/assets/non-predefined-authoring.png)
+
+There is no fixed widget template. The same starting checklist is reshaped entirely through
+conversation — made collapsible, given bold styling for uncompleted items, restyled with a modern red
+accent, and retitled — each change is genuinely new generated code, not a toggle on a preset.
+
+### Further authored interface examples
+
+![Further authored interface examples](docs/assets/further-examples.png)
+
+A few more examples of what users have authored beyond checklists: a thermostat-style completion
+gauge, a "spaceship" progress visualization, a countdown timer, and a dense multi-field tracker —
+each grounded in a different real page, none from a predefined library.
+
 ## Design commitments
 
 - **User authorship, not a fixed toolkit.** The widget is generated code, not a template. There is no
