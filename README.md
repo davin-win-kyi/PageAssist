@@ -41,22 +41,12 @@ Everything in the system is one of three linked representations:
 
 ## How it fits together
 
-```
-        ┌─────────────── side panel (React) ───────────────┐
-        │  chat  ──────────────►  interface representation  │   (webpage-agnostic, reusable)
-        │  page open  ────────►  task representation        │   (this page, grounded)
-        └───────────────────────────┬──────────────────────┘
-                                    │  activate / agree
-                                    ▼
-                    backend combines the two via Claude
-                                    │
-                                    ▼
-                          webpage interface (JS)
-                                    │  chrome.tabs.sendMessage
-                                    ▼
-        content script hosts it in a sandboxed iframe on the real page;
-        refreshes its live "complete" state on every keystroke, no model call
-```
+![PageAssist system figure](docs/assets/system-figure.png)
+
+The user provides a webpage. The webpage is turned into a task representation. TaskWeb uses that
+task representation along with the user's preferences to produce a webpage interface that best
+assists the user — while saving an interface representation that can be used to create webpage
+interfaces on other webpages as well.
 
 - The **content script** reads the page (for analysis), watches it for change, and hosts the widget
   iframe. It draws **no chrome** — the widget authors its own title bar / drag handle / close button
@@ -71,15 +61,6 @@ Everything in the system is one of three linked representations:
 
 A visual walkthrough of the pipeline above, the conversation that drives it, and what the result
 looks like on real pages. (Images live in `docs/assets/` — see the filenames below.)
-
-### System overview
-
-![PageAssist system figure](docs/assets/system-figure.png)
-
-The user provides a webpage. The webpage is turned into a task representation. TaskWeb uses that
-task representation along with the user's preferences to produce a webpage interface that best
-assists the user — while saving an interface representation that can be used to create webpage
-interfaces on other webpages as well.
 
 ### The conversation
 

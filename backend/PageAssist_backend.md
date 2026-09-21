@@ -47,36 +47,60 @@ re-exports from its `__init__.py`, so callers write `from api.endpoints import t
 
 ```
 backend/
-  main.py                     FastAPI app: mounts the 4 routers, /health
+  main.py            FastAPI app: mounts the 4 routers, /health
   api/
-    endpoints/                one package per domain (each __init__ re-exports `router`)
-      task/router.py                        POST /task-representations/{id}/analyze, /patch, GET
-      chat/router.py                        POST /chat
-      interface_representation/router.py    /interface-representation(s) — working tree + saved DB CRUD
-      webpage_interface/router.py           generate/GET a widget; the model call + fallback + selector
-                                             enforcement live in this same file
-      webpage_interface/fallback_widget.js  hand-written widget JS, used when the model call fails
-    state/                     in-process state (mutated in place, never rebound — see Folders above)
-      task.py                       task_store (the single current-webpage slot) + persistence
-      interface_representation.py   interface_store + active-tree accessors + persistence + default tree
-      webpage_interface.py          the current widget — IN MEMORY ONLY (never persisted)
-    utils/                     shared infra used across domains
-      json_store.py                  shared JSON load/dump + points at backend/data/
-      llm.py                         Anthropic client, streaming create, call_structured_tool()
-      debuglog.py                    append-only JSONL logs under backend/data/ (+ truncate_jsonl)
-  definitions/                prompts + schemas per domain — NO behavior. one prompts.py + schema.py each
-    task/prompts.py               TASK_REPRESENTATION_GUIDE — how to read a page into tasks/components
-    task/schema.py                the task representation's Pydantic models + tool input_schema
-    chat/prompts.py                TASKWEB_GUIDE — how to hold the conversation, when to set `agreed`
-    chat/schema.py                 Chat* models + the respond_and_update_interface tool
-    interface_representation/schema.py   SaveInterfaceRepresentationRequest; prompts.py is a stub (no prompt)
-    webpage_interface/prompts.py   WEBPAGE_INTERFACE_GUIDE — how to turn preferences+page into a widget
-    webpage_interface/schema.py    the build_webpage_interface tool's input_schema
-  data/                       runtime JSON (git-ignored) — NOT the api/state/ package
-    task_representations.json        {site_id, task_representation, page_text}
-    interface_representations.json   {active_tree, active_agreed, representations{}}
-    chat_log.jsonl                   one line per /chat turn; truncated on a new chat
+    endpoints/        one package per domain (each __init__ re-exports `router`)
+    state/             in-process state (mutated in place, never rebound — see Folders above)
+    utils/             shared infra used across domains
+  definitions/        prompts + schemas per domain — NO behavior. one prompts.py + schema.py each
+  data/                runtime JSON (git-ignored) — NOT the api/state/ package
 ```
+
+**`api/endpoints/`** — one package per domain, each `__init__.py` re-exporting `router`:
+
+| File | Purpose |
+|---|---|
+| `task/router.py` | `POST /task-representations/{id}/analyze`, `/patch`, and the `GET` |
+| `chat/router.py` | `POST /chat` |
+| `interface_representation/router.py` | `/interface-representation(s)` — working tree + saved DB CRUD |
+| `webpage_interface/router.py` | generate/GET a widget; the model call, fallback, and selector enforcement all live in this one file |
+| `webpage_interface/fallback_widget.js` | hand-written widget JS, used when the model call fails |
+
+**`api/state/`** — plain module-level dicts + the getters/setters around them:
+
+| File | Purpose |
+|---|---|
+| `task.py` | `task_store` (the single current-webpage slot) + persistence |
+| `interface_representation.py` | `interface_store` + active-tree accessors + persistence + default tree |
+| `webpage_interface.py` | the current widget — IN MEMORY ONLY (never persisted) |
+
+**`api/utils/`** — shared infra with no domain knowledge:
+
+| File | Purpose |
+|---|---|
+| `json_store.py` | shared JSON load/dump + points at `backend/data/` |
+| `llm.py` | Anthropic client, streaming create, `call_structured_tool()` |
+| `debuglog.py` | append-only JSONL logs under `backend/data/` (+ `truncate_jsonl`) |
+
+**`definitions/`** — one `prompts.py` + `schema.py` per domain, pure data:
+
+| File | Purpose |
+|---|---|
+| `task/prompts.py` | `TASK_REPRESENTATION_GUIDE` — how to read a page into tasks/components |
+| `task/schema.py` | the task representation's Pydantic models + tool `input_schema` |
+| `chat/prompts.py` | `TASKWEB_GUIDE` — how to hold the conversation, when to set `agreed` |
+| `chat/schema.py` | `Chat*` models + the `respond_and_update_interface` tool |
+| `interface_representation/schema.py` | `SaveInterfaceRepresentationRequest`; `prompts.py` is a stub (no prompt) |
+| `webpage_interface/prompts.py` | `WEBPAGE_INTERFACE_GUIDE` — how to turn preferences + page into a widget |
+| `webpage_interface/schema.py` | the `build_webpage_interface` tool's `input_schema` |
+
+**`data/`** — runtime JSON (git-ignored), the on-disk form of `api/state/`'s dicts:
+
+| File | Purpose |
+|---|---|
+| `task_representations.json` | `{site_id, task_representation, page_text}` |
+| `interface_representations.json` | `{active_tree, active_agreed, representations{}}` |
+| `chat_log.jsonl` | one line per `/chat` turn; truncated on a new chat |
 
 Imports: state lives in `api/state/<domain>.py`, mutated in place (never rebound), so
 `from api.state.task import task_store` stays valid after `replace_task_store()`. `chat` and
