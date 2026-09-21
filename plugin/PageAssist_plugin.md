@@ -19,7 +19,7 @@ One-off production build: `npm run build` (runs `tsc --noEmit` then `wxt build`)
 
 Set `VITE_API_URL` if the backend is not at `http://localhost:8000`.
 
-## Figures
+## How it works
 
 The conversation the side panel drives, and what the sandbox is capable of rendering. The file-by-file
 details follow below.
@@ -77,7 +77,7 @@ tracker.
 
 The only UI surface in the extension, and the orchestrator — it is what decides *when* to talk to the
 backend and *when* to push a widget onto the page; neither the content script nor the sandbox ever
-decides that themselves (see the conversation figure above). It:
+decides that themselves (see the conversation walkthrough under How it works above). It:
 
 - Computes a `site_id` from the active tab's URL (`hostname + pathname + search`, `/` → `~`) and, on
   a real page change, calls `POST /task-representations/{id}/analyze`. If the active tab has no content
@@ -154,7 +154,7 @@ execution context — this file. `render(state)` is the whole contract: the gene
 on every later update.
 
 There is no fixed widget template running in here, and nothing about it is checklist-specific — see
-the two examples in Figures above.
+the two examples under How it works above.
 
 **Properties of the sandbox** (each is a real, structural restriction — not a convention the widget
 code is trusted to respect):

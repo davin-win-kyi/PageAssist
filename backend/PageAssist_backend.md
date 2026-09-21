@@ -28,7 +28,7 @@ deterministic fallback, so the service still runs end to end.
 
 CORS is open to `http://localhost:5173` (the WXT dev origin).
 
-## Figures
+## How it works
 
 A visual look at the three representations this backend produces, and the two behaviors they enable
 (reuse across pages, live adaptation to page changes). The file-by-file details follow below.
@@ -161,8 +161,8 @@ that confusion.
 
 TaskWeb's whole pipeline is three progressively more concrete objects, each built from the one before
 it (see the [top-level README](../README.md) for the end-to-end picture; this section is what each one
-*is* and why it exists as its own thing rather than being folded into another; see Figures above for
-the shapes of the first two side by side).
+*is* and why it exists as its own thing rather than being folded into another; see How it works above
+for the shapes of the first two side by side).
 
 - **Task representation** (`definitions/task/`, `api/state/task.py`) — a structured model of what a
   *specific page* is asking the user to do, grounded in its real DOM elements. Two tiers: `tasks` are
@@ -188,7 +188,7 @@ the shapes of the first two side by side).
   meaningful while the client that asked for it is still on that page.
 
 Because the interface representation is never grounded in any one page, the same one can be built for
-one site and reused on a completely different one (see the transfer example in Figures above).
+one site and reused on a completely different one (see the transfer example under How it works above).
 
 ## State
 
@@ -250,7 +250,7 @@ as a real control — otherwise a plain single-field component's own label id re
 no matter what the user types. (This is exactly what happened before this exclusion existed: adding
 `enforce_bundled_selectors` broke live completion for ordinary text fields site-wide.)
 
-This is the mechanism behind the adapting-to-changes example in Figures above:
+This is the mechanism behind the adapting-to-changes example under How it works above:
 
 `/task-representations/{id}/patch` uses `get_fast_client_and_model()` (`ANTHROPIC_MODEL_FAST`, else
 `ANTHROPIC_MODEL`) with a tiny prompt that returns **only the new component(s)** for a few
