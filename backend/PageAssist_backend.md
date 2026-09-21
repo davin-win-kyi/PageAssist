@@ -114,6 +114,13 @@ TaskWeb's whole pipeline is three progressively more concrete objects, each buil
 it (see the [top-level README](../README.md) for the end-to-end picture; this section is what each one
 *is* and why it exists as its own thing rather than being folded into another).
 
+![Interface representation and task representation shapes](../docs/assets/representation-shapes.png)
+
+The task representation best represents the current task and the elements related to that task. The
+interface representation is the best representation of the desired task-based interface *without*
+being grounded in any given webpage — which is exactly what makes it reusable and adaptable to active
+webpage changes.
+
 - **Task representation** (`definitions/task/`, `api/state/task.py`) — a structured model of what a
   *specific page* is asking the user to do, grounded in its real DOM elements. Two tiers: `tasks` are
   coarse goals ("fill out this application"), `components` are individual, per-question groupings (one
@@ -136,6 +143,15 @@ it (see the [top-level README](../README.md) for the end-to-end picture; this se
   iframe on that specific page. This is the only one of the three that's actually shown to the user,
   and the only one never persisted to disk — it's cheap to regenerate from the other two and only
   meaningful while the client that asked for it is still on that page.
+
+Because the interface representation is never grounded in any one page, the same one can be built for
+one site and reused on a completely different one:
+
+![Transferring a task interface to a new page](../docs/assets/transferring-interface.png)
+
+An interface built for a job application is saved as a reusable interface representation, then
+re-activated on a recipe site — the widget it produces there is grounded in *that* page's own
+elements, even though the underlying preferences never changed.
 
 ## State
 
@@ -196,6 +212,13 @@ as a real control — otherwise a plain single-field component's own label id re
 "required" control that, being a `<label>`, can never complete, and the item locks incomplete forever
 no matter what the user types. (This is exactly what happened before this exclusion existed: adding
 `enforce_bundled_selectors` broke live completion for ordinary text fields site-wide.)
+
+![Actively adapting a task interface to webpage changes](../docs/assets/adapting-to-changes.png)
+
+Support is applied to a page; an active change occurs on it (here, answering "Are you
+Hispanic/Latino?" reveals a follow-up race/ethnicity question); the interface adapts to account for
+the change — without the user redoing anything, and without a full re-analysis of the page. This
+patch endpoint is the mechanism behind that adaptation:
 
 `/task-representations/{id}/patch` uses `get_fast_client_and_model()` (`ANTHROPIC_MODEL_FAST`, else
 `ANTHROPIC_MODEL`) with a tiny prompt that returns **only the new component(s)** for a few
