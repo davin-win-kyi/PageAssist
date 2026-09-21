@@ -5,41 +5,13 @@ difficulty you have with a page; TaskWeb helps you shape a reusable support conc
 as a small widget grounded in that page's real elements — a live checklist, a progress tracker, a
 "what's left" panel, whatever you and the assistant land on.
 
-## Folders, at a glance
+## In practice
 
-| Folder | Purpose | README |
-|---|---|---|
-| `plugin/` | The Chrome extension a user actually installs — WXT + React. Reads the page, chats with the backend, and hosts the generated widget on the page in a sandboxed iframe. | [plugin/PageAssist_plugin.md](plugin/PageAssist_plugin.md) |
-| `backend/` | FastAPI + Claude service. Turns a page's real elements plus a user's chat-shaped preferences into the concrete widget the plugin displays. `api/` = `endpoints/<domain>/` (routes) + `state/` (in-process data) + `utils/` (shared infra); `definitions/<domain>/` = `prompts.py` + `schema.py` (what the model is told, no behavior). | [backend/PageAssist_backend.md](backend/PageAssist_backend.md) |
-| `tests/` | All tests for both halves, run as plain scripts (no pytest/vitest) against the real production code. | [tests/PageAssist_Tests.md](tests/PageAssist_Tests.md) |
+A visual walkthrough of the whole system: the pipeline, the conversation that drives it, and what the
+result looks like on real pages. (Images live in `docs/assets/`.) The file-by-file details follow
+further down.
 
-Each of those has its own README with the full file-by-file breakdown — this one stays at the
-system level: what the three representations are, and how a request flows end to end.
-
-## The three representations
-
-Everything in the system is one of three linked representations:
-
-- **Task representation** — a task-aware semantic model of **one specific webpage**, grounded strictly
-  in its real, visible elements. Two flat tiers:
-  `{page_purpose, page_type, tasks[], components[], modeling_notes}`.
-  `tasks` are coarse goals (hierarchy via `parent_task_id`); `components` carry per-question
-  granularity — **each individual form field is its own component**, since that's what completion
-  tracking targets — with selectors copied verbatim from the DOM. Rebuilt per page; never fabricated.
-
-- **Interface representation** — a single, **webpage-agnostic** set of support preferences, shaped
-  entirely through chat against a generic preview. Shape:
-  `{component, description, style, preferences, children[]}` where `style` is real CSS, `preferences`
-  is short intent phrases (never literal page text), `description` is one plain sentence on what the
-  support is, and `children` are structural groupings generic to the *kind* of task. One is "active"
-  at a time; any can be saved to a reusable database and re-activated on a different site later.
-
-- **Webpage interface** — the concrete widget for one site: its task representation realized through
-  the active interface representation. Model-generated JavaScript that runs in a sandboxed iframe,
-  plus a small host-managed `style` (frame position/size) and `state.items` (the real elements it
-  tracks).
-
-## How it fits together
+### System overview
 
 ![PageAssist system figure](docs/assets/system-figure.png)
 
@@ -57,11 +29,6 @@ interfaces on other webpages as well.
 - Live completion state (a checklist ticking off as you fill fields) is read straight from the DOM by
   the content script — the model never computes or represents it.
 
-## In practice
-
-A visual walkthrough of the pipeline above, the conversation that drives it, and what the result
-looks like on real pages. (Images live in `docs/assets/` — see the filenames below.)
-
 ### The conversation
 
 ![PageAssist conversation interface](docs/assets/conversation-flow.png)
@@ -77,7 +44,7 @@ interface from scratch. The user can then refine the interface and save it once 
 The task representation best represents the current task and the elements related to that task. The
 interface representation is the best representation of the desired task-based interface *without*
 being grounded in any given webpage — which is exactly what makes it reusable and adaptable to active
-webpage changes (see the two contributions below).
+webpage changes (see the two examples below).
 
 ### Actively adapting to webpage changes
 
@@ -111,6 +78,40 @@ accent, and retitled — each change is genuinely new generated code, not a togg
 A few more examples of what users have authored beyond checklists: a thermostat-style completion
 gauge, a "spaceship" progress visualization, a countdown timer, and a dense multi-field tracker —
 each grounded in a different real page, none from a predefined library.
+
+## Folders, at a glance
+
+| Folder | Purpose | README |
+|---|---|---|
+| `plugin/` | The Chrome extension a user actually installs — WXT + React. Reads the page, chats with the backend, and hosts the generated widget on the page in a sandboxed iframe. | [plugin/PageAssist_plugin.md](plugin/PageAssist_plugin.md) |
+| `backend/` | FastAPI + Claude service. Turns a page's real elements plus a user's chat-shaped preferences into the concrete widget the plugin displays. `api/` = `endpoints/<domain>/` (routes) + `state/` (in-process data) + `utils/` (shared infra); `definitions/<domain>/` = `prompts.py` + `schema.py` (what the model is told, no behavior). | [backend/PageAssist_backend.md](backend/PageAssist_backend.md) |
+| `tests/` | All tests for both halves, run as plain scripts (no pytest/vitest) against the real production code. | [tests/PageAssist_Tests.md](tests/PageAssist_Tests.md) |
+
+Each of those has its own README with the full file-by-file breakdown — this one stays at the
+system level: what the three representations are, and how a request flows end to end.
+
+## The three representations
+
+Everything in the system is one of three linked representations:
+
+- **Task representation** — a task-aware semantic model of **one specific webpage**, grounded strictly
+  in its real, visible elements. Two flat tiers:
+  `{page_purpose, page_type, tasks[], components[], modeling_notes}`.
+  `tasks` are coarse goals (hierarchy via `parent_task_id`); `components` carry per-question
+  granularity — **each individual form field is its own component**, since that's what completion
+  tracking targets — with selectors copied verbatim from the DOM. Rebuilt per page; never fabricated.
+
+- **Interface representation** — a single, **webpage-agnostic** set of support preferences, shaped
+  entirely through chat against a generic preview. Shape:
+  `{component, description, style, preferences, children[]}` where `style` is real CSS, `preferences`
+  is short intent phrases (never literal page text), `description` is one plain sentence on what the
+  support is, and `children` are structural groupings generic to the *kind* of task. One is "active"
+  at a time; any can be saved to a reusable database and re-activated on a different site later.
+
+- **Webpage interface** — the concrete widget for one site: its task representation realized through
+  the active interface representation. Model-generated JavaScript that runs in a sandboxed iframe,
+  plus a small host-managed `style` (frame position/size) and `state.items` (the real elements it
+  tracks).
 
 ## Design commitments
 

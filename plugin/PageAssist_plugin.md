@@ -19,6 +19,29 @@ One-off production build: `npm run build` (runs `tsc --noEmit` then `wxt build`)
 
 Set `VITE_API_URL` if the backend is not at `http://localhost:8000`.
 
+## Figures
+
+The conversation the side panel drives, and what the sandbox is capable of rendering. The file-by-file
+details follow below.
+
+![PageAssist conversation interface](../docs/assets/conversation-flow.png)
+
+The chat this component drives, end to end: the user is given an introduction, voices their task
+difficulty, is offered options or authors their own interface, refines it, and saves it once complete
+— each step above is a real transcript from that flow.
+
+![Non-predefined authoring](../docs/assets/non-predefined-authoring.png)
+
+There is no fixed widget template running in the sandbox — the same starting checklist can be
+reshaped entirely through conversation, each time as genuinely new generated code rather than a
+toggle on a preset.
+
+![Further authored interface examples](../docs/assets/further-examples.png)
+
+And because nothing about the sandbox is checklist-specific, users have authored widgets well outside
+that shape too — a completion gauge, a progress visualization, a countdown timer, a dense multi-field
+tracker.
+
 ## Folders, at a glance
 
 | Folder | Purpose |
@@ -54,13 +77,7 @@ Set `VITE_API_URL` if the backend is not at `http://localhost:8000`.
 
 The only UI surface in the extension, and the orchestrator — it is what decides *when* to talk to the
 backend and *when* to push a widget onto the page; neither the content script nor the sandbox ever
-decides that themselves.
-
-![PageAssist conversation interface](../docs/assets/conversation-flow.png)
-
-The chat this component drives, end to end: the user is given an introduction, voices their task
-difficulty, is offered options or authors their own interface, refines it, and saves it once complete
-— each step below is a real transcript from that flow. It:
+decides that themselves (see the conversation figure above). It:
 
 - Computes a `site_id` from the active tab's URL (`hostname + pathname + search`, `/` → `~`) and, on
   a real page change, calls `POST /task-representations/{id}/analyze`. If the active tab has no content
@@ -136,17 +153,8 @@ execution context — this file. `render(state)` is the whole contract: the gene
 `window.render = function(state) {...}` and the host calls it once with the initial `state` and again
 on every later update.
 
-There is no fixed widget template running in here — the same starting checklist can be reshaped
-entirely through conversation, each time as genuinely new generated code rather than a toggle on a
-preset:
-
-![Non-predefined authoring](../docs/assets/non-predefined-authoring.png)
-
-And because nothing about the sandbox is checklist-specific, users have authored widgets well outside
-that shape too — a completion gauge, a progress visualization, a countdown timer, a dense multi-field
-tracker:
-
-![Further authored interface examples](../docs/assets/further-examples.png)
+There is no fixed widget template running in here, and nothing about it is checklist-specific — see
+the two examples in Figures above.
 
 **Properties of the sandbox** (each is a real, structural restriction — not a convention the widget
 code is trusted to respect):
