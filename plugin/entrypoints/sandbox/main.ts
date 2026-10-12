@@ -14,7 +14,7 @@
 // to use one fails loudly (visible in its own error state) rather than mysteriously doing nothing.
 function denied(name: string): () => never {
   return () => {
-    throw new Error(`${name} is not available inside the TaskWeb widget sandbox.`);
+    throw new Error(`${name} is not available inside the PageAssist widget sandbox.`);
   };
 }
 Object.assign(window, {
@@ -35,13 +35,37 @@ let render: ((state: unknown) => void) | null = null;
 
 // The only capabilities the host grants generated code over its own frame. There is no host-drawn
 // chrome — a widget that wants a drag handle, a close button, or a fixed height draws that control
-// itself and calls these. Each is a thin message to the host (see the 'move' / 'close' / 'setHeight' /
-// 'resetHeight' handlers in entrypoints/content.ts); nothing here can touch the real page.
+// itself and calls these. Each is a thin message to the host (see the 'dragStart' / 'move' / 'close' /
+// 'setHeight' / 'resetHeight' handlers in entrypoints/content.ts); nothing here can touch the real page.
 function postToHost(message: Record<string, unknown>) {
-  window.parent.postMessage({ source: 'taskweb-sandbox', ...message }, '*');
+  window.parent.postMessage({ source: 'pageassist-sandbox', ...message }, '*');
 }
+
+// Dragging: the widget's handle calls startDrag(event) on pointerdown. While the pointer stays over this
+// frame, this runtime forwards its screen position; the host moves the frame, and catches the pointer
+// once it leaves the frame (lib/frame-drag.ts). Listeners attached once, here — never by the widget.
+let dragging = false;
+function endDrag() {
+  if (!dragging) return;
+  dragging = false;
+  postToHost({ type: 'dragEnd' });
+}
+document.addEventListener('pointermove', (event) => {
+  if (!dragging) return;
+  if (event.buttons === 0) return endDrag(); // released somewhere this frame didn't see
+  postToHost({ type: 'dragMove', screenX: event.screenX, screenY: event.screenY });
+}, true);
+document.addEventListener('pointerup', endDrag, true);
+document.addEventListener('pointercancel', endDrag, true);
+
 Object.assign(window, {
-  taskweb: {
+  pageassist: {
+    startDrag: (event: PointerEvent | MouseEvent) => {
+      if (!event || typeof event.screenX !== 'number' || typeof event.screenY !== 'number') return;
+      event.preventDefault?.(); // no text selection while dragging
+      dragging = true;
+      postToHost({ type: 'dragStart', screenX: event.screenX, screenY: event.screenY });
+    },
     move: (dx: number, dy: number) => postToHost({ type: 'move', dx: Number(dx) || 0, dy: Number(dy) || 0 }),
     close: () => postToHost({ type: 'close' }),
     setHeight: (px: number) => postToHost({ type: 'setHeight', height: Math.max(0, Number(px) || 0) }),
@@ -55,9 +79,51 @@ Object.assign(window, {
 // updates, CSS transitions settling), so the host can size the iframe to fit.
 function reportSize() {
   const height = document.body.scrollHeight;
-  window.parent.postMessage({ source: 'taskweb-sandbox', type: 'resize', height }, '*');
+  window.parent.postMessage({ source: 'pageassist-sandbox', type: 'resize', height }, '*');
 }
 new ResizeObserver(() => reportSize()).observe(document.body);
+
+// A render rebuilds document.body, which snaps the widget's scroll — the frame itself and any scrolling
+// panel inside it — back to the top. Put back every position the rebuild reset to 0; a position the
+// widget's own render set on purpose (anything else) is left alone.
+type ScrollSpot = { path: number[] | null; top: number; left: number }; // null path = the frame itself
+function pathTo(element: Element): number[] {
+  const path: number[] = [];
+  for (let node: Element = element; node !== document.body && node.parentElement; node = node.parentElement) {
+    path.unshift(Array.prototype.indexOf.call(node.parentElement.children, node));
+  }
+  return path;
+}
+function elementAt(path: number[]): Element | null {
+  let node: Element | null = document.body;
+  for (const index of path) node = node?.children[index] ?? null;
+  return node;
+}
+function captureScroll(): ScrollSpot[] {
+  const spots: ScrollSpot[] = [];
+  const frame = document.scrollingElement;
+  if (frame && (frame.scrollTop || frame.scrollLeft)) spots.push({ path: null, top: frame.scrollTop, left: frame.scrollLeft });
+  document.body.querySelectorAll('*').forEach((element) => {
+    if (element.scrollTop || element.scrollLeft) spots.push({ path: pathTo(element), top: element.scrollTop, left: element.scrollLeft });
+  });
+  return spots;
+}
+function restoreScroll(spots: ScrollSpot[]) {
+  for (const spot of spots) {
+    const element = spot.path ? elementAt(spot.path) : document.scrollingElement;
+    if (element && element.scrollTop === 0 && element.scrollLeft === 0) {
+      element.scrollTop = spot.top;
+      element.scrollLeft = spot.left;
+    }
+  }
+}
+function keepingScroll(draw: (state: unknown) => void): (state: unknown) => void {
+  return (state) => {
+    const spots = captureScroll();
+    draw(state);
+    restoreScroll(spots);
+  };
+}
 
 function showError(message: string) {
   document.body.replaceChildren();
@@ -65,7 +131,7 @@ function showError(message: string) {
   el.style.cssText = 'color:#b91c1c;padding:12px;white-space:pre-wrap;';
   el.textContent = `Widget error: ${message}`;
   document.body.appendChild(el);
-  window.parent.postMessage({ source: 'taskweb-sandbox', type: 'error', message }, '*');
+  window.parent.postMessage({ source: 'pageassist-sandbox', type: 'error', message }, '*');
 }
 
 window.addEventListener('message', (event) => {
@@ -88,7 +154,8 @@ window.addEventListener('message', (event) => {
         showError('generated code did not define window.render(state)');
         return;
       }
-      render = win.render;
+      render = keepingScroll(win.render);
+      win.render = render; // the widget's own window.render(...) calls (ticking a box) keep scroll too
       render(data.state);
       reportSize();
     } catch (error) {
@@ -108,4 +175,4 @@ window.addEventListener('message', (event) => {
 // Sent the moment the listener above is live. A real navigation (as opposed to srcdoc) means any message
 // the host sends before this fires is simply dropped, not queued — the host must wait for this before
 // posting 'init'.
-window.parent.postMessage({ source: 'taskweb-sandbox', type: 'sandbox-ready' }, '*');
+window.parent.postMessage({ source: 'pageassist-sandbox', type: 'sandbox-ready' }, '*');

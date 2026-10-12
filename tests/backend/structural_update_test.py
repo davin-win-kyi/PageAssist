@@ -13,10 +13,14 @@ Run (from repo root):  PYTHONPATH=backend backend/.venv/bin/python tests/backend
 No ANTHROPIC_MODEL -> deterministic fallback path (one component per control); the plumbing
 assertions hold either way.
 """
+import os
 import sys
+import tempfile
 from urllib.parse import quote
 from fastapi.testclient import TestClient
 
+# A throwaway data dir, so analyzing/patching here never overwrites a real session's backend/data.
+os.environ["PAGEASSIST_DATA_DIR"] = tempfile.mkdtemp(prefix="pageassist-test-")
 import main
 
 c = TestClient(main.app)
@@ -157,6 +161,10 @@ check("patch linked #race to a task",
           and comp.get("component_id") in {cid for t in tr_patched.get("tasks", []) for cid in t.get("component_ids", [])}
           for comp in tr_patched.get("components", [])))
 check("GET reflects the patched representation", "#race" in tracked_selectors(c.get(f"/task-representations/{SITE}").json()))
+# The panel splices these into the widget already on the page instead of regenerating it.
+check("patch returns the new question as a widget item (added_items)",
+      any("#race" in ([it.get("selector")] + (it.get("selectors") or [])) for it in tr_patched.get("added_items", [])),
+      str(tr_patched.get("added_items")))
 w_patched = generate()
 check("regenerated widget from the patched rep includes #race", "#race" in item_selectors(w_patched))
 r = c.post(f"/task-representations/{SITE}/patch", json={"added": [], "removed": ["#race"]})
@@ -170,12 +178,12 @@ r = c.post(f"/task-representations/{SITE}/patch", json={
     # real task-representation change (App.tsx skips /generate + the "detected a change" line on this).
 })
 check("cosmetic-only removal reports changed=false", r.json().get("changed") is False)
+check("cosmetic-only removal has no widget items to splice in", r.json().get("added_items") == [])
 check("cosmetic-only removal leaves components untouched",
       len(r.json()["components"]) == n_before_cosmetic)
 
-print("\n== 4. cap check: a full-length form must not drop the newly revealed field ==")
-# The real page has ~26 fields; components_to_items caps at 20. Make sure a field revealed LATE
-# still lands in the widget rather than being truncated away.
+print("\n== 4. long form: a field revealed LATE must not be truncated out of the widget ==")
+# The real page has ~26 fields, and #race is appended after all of them — the 28th control here.
 padded_before = BEFORE + [field(f"question_{i}", f"Screening question {i}") for i in range(18)]
 padded_after = padded_before + [field("race", "Please identify your race/ethnicity", role="combobox")]
 analyze(padded_before)
@@ -184,8 +192,50 @@ analyze(padded_after)
 w_padded = generate()
 padded_items = item_selectors(w_padded)
 print(f"  padded widget: {len(padded_items)} items; #race present: {'#race' in padded_items}")
-check("newly revealed field survives the 20-item widget cap on a long form", "#race" in padded_items,
-      "increase components_to_items limit or prioritise revealed/interacted fields")
+check("the newly revealed 28th control is in the widget on a long form", "#race" in padded_items)
+if w_padded.get("degraded"):  # the model-free widget, built by components_to_items
+    n_components = len(c.get(f"/task-representations/{SITE}").json()["components"])
+    check("the fallback widget lists every component — no item cap",
+          len(w_padded["state"]["items"]) == n_components,
+          f"{len(w_padded['state']['items'])} items for {n_components} components")
+
+print("\n== 5. a REVEALED question (in the DOM all along, hidden, now visible) ==")
+# content.ts sends these grouped per question; the backend adds one only if nothing of it is mapped.
+analyze(BEFORE)
+race = {"id": "race", "selector": "#race", "tag": "input", "text": "", "role": "combobox",
+        "accessibleName": "Please identify your race/ethnicity", "visible": True}
+r = c.post(f"/task-representations/{SITE}/patch", json={"revealed": [[race]]})
+check("revealed + not yet mapped -> added, changed=true",
+      "#race" in tracked_selectors(r.json()) and r.json().get("changed") is True, r.text[:300])
+n_mapped = len(r.json()["components"])
+r = c.post(f"/task-representations/{SITE}/patch", json={"revealed": [[race]]})
+check("revealed + already mapped -> availability only: no duplicate component, changed=false",
+      r.json().get("changed") is False and len(r.json()["components"]) == n_mapped, r.text[:300])
+
+vet = [{"id": f"vet-{v}", "selector": f"#vet-{v}", "tag": "input", "text": "", "role": "radio",
+        "accessibleName": v.capitalize(), "visible": True} for v in ("yes", "no", "decline")]
+# The group is mapped via ONE option — put straight into the stored representation, not via a patch:
+# whether the model models a lone, unlabelled "Yes" radio is its judgment call, and this check is about
+# the deterministic already-mapped rule (_unmapped_revealed), not that call.
+from api.state.task import task_store, replace_task_store
+_rep = c.get(f"/task-representations/{SITE}").json()
+_rep["components"].append({"component_id": "c900", "component_type": "single-choice-question", "semantic_role": "veteran-status",
+                           "label": "Veteran status", "description": "", "dom_selector": "#vet-yes", "member_selectors": ["#vet-yes"],
+                           "associated_task_ids": [], "required_for_task": "unknown", "importance": "supporting"})
+replace_task_store(task_store["site_id"], _rep, task_store.get("page_text", ""))
+n_mapped = len(_rep["components"])
+r = c.post(f"/task-representations/{SITE}/patch", json={"revealed": [vet]})
+check("a revealed radio group with ANY option already mapped adds nothing (no lone-option component)",
+      r.json().get("changed") is False and len(r.json()["components"]) == n_mapped, r.text[:300])
+
+print("\n== 6. context containers flow through analyze and patch ==")
+eeo = {"selector": "#eeo", "tag": "section", "role": "", "label": "Voluntary self-identification", "parent": ""}
+r = c.post(f"/task-representations/{SITE}/analyze", json={
+    "url": URL, "title": "Applied AI Engineer — Snorkel AI",
+    "elements": [dict(e, container="#eeo") for e in BEFORE], "containers": [eeo]})
+check("analyze accepts elements with container/description/completion_status + a containers list", r.status_code == 200, r.text[:300])
+r = c.post(f"/task-representations/{SITE}/patch", json={"added": [dict(race, container="#eeo")], "containers": [eeo]})
+check("patch accepts the containers its added elements sit in", r.status_code == 200, r.text[:300])
 
 print("\n== RESULT ==")
 if FAIL:

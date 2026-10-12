@@ -5,9 +5,13 @@ Run (from repo root):  PYTHONPATH=backend backend/.venv/bin/python tests/backend
 import json
 import os
 import sys
+import tempfile
 from urllib.parse import quote
 from fastapi.testclient import TestClient
 
+# A throwaway data dir — this test saves, resets and analyzes, and must never touch a real session's
+# backend/data (it used to leave a blank "Field checklist" in the saved-interface library every run).
+os.environ["PAGEASSIST_DATA_DIR"] = tempfile.mkdtemp(prefix="pageassist-test-")
 import main
 
 c = TestClient(main.app)
@@ -78,6 +82,13 @@ if comps:
           visible_fields <= tracked, str(sorted(visible_fields - tracked)))
     check("closed enums valid",
           all(c["semantic_role"] and c["importance"] in ("primary", "supporting", "peripheral") for c in comps))
+    from definitions.task import ComponentType
+    check("every component has a valid component_type",
+          all(c.get("component_type") in ComponentType.__args__ for c in comps), str([c.get("component_type") for c in comps]))
+    ids = {c["component_id"] for c in comps}
+    check("relationships only link real components",
+          isinstance(tr.get("relationships"), list)
+          and all(r["source"] in ids and r["target"] in ids for r in tr["relationships"]), str(tr.get("relationships")))
 
 print("\n== 3. GET task representation ==")
 r = c.get(f"/task-representations/{SITE}")

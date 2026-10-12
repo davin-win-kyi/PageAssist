@@ -114,53 +114,5 @@ console.log('\n== 4. Yes/No radiogroup ==');
     isElementComplete(onGroup.body.querySelector(onGroup.sel)!, onGroup.sel), true);
 }
 
-// ---------------------------------------------------------------------------------------------------
-// 5. Structural detection — mirrors content.ts handlePageChange field-set diff.
-// ---------------------------------------------------------------------------------------------------
-const FIELD_ROLES = new Set(['textbox', 'combobox', 'checkbox', 'radio', 'searchbox', 'spinbutton', 'switch']);
-const POPUP_SELECTOR = '[role="listbox"], [role="menu"], [role="tooltip"], [aria-modal="true"], [class*="menu" i], [class*="popover" i], [class*="popup" i], [class*="tooltip" i], [class*="option-list" i], [class*="options-list" i]';
-const PAGE_ELEMENT_SELECTOR = 'a, button, input, textarea, select, option, label, fieldset, legend, form, h1, h2, h3, h4, h5, h6, [id], [data-testid], [aria-label], [aria-labelledby], [aria-required], [role], [contenteditable="true"]';
-function fieldSet(body: Element): Set<string> {
-  return new Set(
-    [...body.querySelectorAll(PAGE_ELEMENT_SELECTOR)]
-      .filter((e) => !e.closest?.(POPUP_SELECTOR))
-      .filter((e) => ['input', 'textarea', 'select', 'label', 'fieldset', 'legend'].includes(e.tagName.toLowerCase())
-        || FIELD_ROLES.has(e.getAttribute('role') || ''))
-      .map((e, i) => e.id || e.getAttribute('for') || `${e.tagName}#${i}`),
-  );
-}
-function structural(before: Element, after: Element): boolean {
-  const b = fieldSet(before);
-  const a = fieldSet(after);
-  let d = 0;
-  a.forEach((s) => { if (!b.has(s)) d += 1; });
-  b.forEach((s) => { if (!a.has(s)) d += 1; });
-  return d >= 1;
-}
-
-console.log('\n== 5. structural change detection ==');
-{
-  const base = `
-    <div class="ashby-application-form-field-entry"><label for="src">How did you hear about us?</label>
-      <div class="_select_1v5zz_36" role="combobox"><div class="_placeholder_1v5zz_50">Select...</div>
-      <input id="src" role="combobox" value="" /></div></div>`;
-  const withOther = base + `
-    <div class="ashby-application-form-field-entry"><label for="src_other">Please specify</label>
-      <input id="src_other" type="text" value="" /></div>`;
-  const menuOpen = base + `
-    <div class="_dropdownMenu_1v5zz_90" role="listbox">
-      <div class="_option_1v5zz_99" role="option" id="opt-li">LinkedIn</div>
-      <div class="_option_1v5zz_99" role="option" id="opt-x">Twitter / X</div>
-    </div>`;
-  const picked = `
-    <div class="ashby-application-form-field-entry"><label for="src">How did you hear about us?</label>
-      <div class="_select_1v5zz_36" role="combobox"><div class="_value_1v5zz_58">LinkedIn</div>
-      <input id="src" role="combobox" value="" /></div></div>`;
-
-  check('picking a value (placeholder -> value chip) is NOT structural', structural(frag(base), frag(picked)), false);
-  check('opening the dropdown menu is NOT structural (options in a listbox popup)', structural(frag(base), frag(menuOpen)), false);
-  check('a revealed "Please specify" field IS structural', structural(frag(base), frag(withOther)), true);
-}
-
 console.log(`\n== RESULT ==\n  ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

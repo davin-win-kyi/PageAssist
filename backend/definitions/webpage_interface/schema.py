@@ -10,21 +10,15 @@ WEBPAGE_INTERFACE_TOOL = {
         "properties": {
             "style": {
                 "type": "object",
-                "description": (
-                    "Real CSS for the widget's OUTER frame — position and size only (bottom, right, width, "
-                    "height), applied by the host to the frame. The widget's own look lives in your code; "
-                    "never put look-and-feel properties here."
-                ),
+                "description": "CSS for the widget's OUTER frame: position and size only (bottom, right, width, height). {} unless the user asked.",
             },
             "code": {
                 "type": "string",
                 "description": (
-                    "JavaScript that assigns window.render = function(state) { ... } and nothing else at the "
-                    "top level. Runs in a locked-down sandboxed iframe: no access to the real page, cookies, "
-                    "storage, or network (fetch/XMLHttpRequest/WebSocket/window.open/navigator.sendBeacon all "
-                    "throw). Build the widget's DOM inside document.body with ordinary APIs. render(state) is "
-                    "re-called on every state change, so it must be idempotent — reset document.body and its "
-                    "inline style at the start of each call."
+                    "JavaScript that assigns window.render = function (state) { ... }, plus only the plain "
+                    "state variables and document/window listeners it needs at top level. Runs in a sandboxed "
+                    "iframe with no network (fetch, XMLHttpRequest, WebSocket, window.open and "
+                    "navigator.sendBeacon throw). render(state) is re-called on every state change."
                 ),
             },
             "state": {
@@ -35,22 +29,19 @@ WEBPAGE_INTERFACE_TOOL = {
                         "items": {
                             "type": "object",
                             "properties": {
-                                "selector": {"type": "string", "description": "GROUNDED, single-control item: copied verbatim from a component's dom_selector or member_selectors — never invented. Omit for a manual item, or when using `selectors` instead."},
-                                "selectors": {"type": "array", "items": {"type": "string"}, "description": "Use INSTEAD OF `selector` when this ONE item tracks a question that needs MORE THAN ONE control filled in to be answered — first + last name, a full street/city/state/zip address. List every control, each copied verbatim from the component's member_selectors. The host requires ALL of them to be filled/chosen before the item counts as complete. Picking just one of several required controls (via `selector`) is wrong here — it reads as done the moment the FIRST one fills, while the rest are still empty."},
                                 "label": {"type": "string"},
-                                "manual": {"type": "boolean", "description": "True for a page-CONTENT item (a recipe step, a section) with no DOM done-state — the user toggles it and YOUR code owns its checked state; the host leaves `complete` alone. Omit/false for a grounded item."},
+                                "selector": {"type": "string", "description": "GROUNDED item: copied verbatim from a component's dom_selector or member_selectors. Omit on a manual item."},
+                                "manual": {"type": "boolean", "description": "True for a MANUAL item (page content with no control); your code owns its done state."},
+                                "id": {"type": "string", "description": "MANUAL item: a short unique id, e.g. \"step-3\"; key its done state by it."},
+                                "section": {"type": "string", "description": "Optional group name. If your code groups by it, set it on every item."},
+                                "detail": {"type": "string", "description": "Optional fuller text for the item, copied from the page (the whole instruction: what to do, where to click, what you'll see). Your code shows it under the label."},
                             },
                             "required": ["label"],
                         },
-                        "description": (
-                            "The widget's checklist. GROUNDED items have `selector` (one control) or `selectors` "
-                            "(multiple controls that must ALL be filled) and the host keeps their live \"complete\" "
-                            "flag in sync; MANUAL items have `manual: true`, no selector(s), and the user toggles "
-                            "them. Your code shows each item's state but only computes it for manual ones."
-                        ),
+                        "description": "The widget's items. The host keeps `complete` and `required` live on grounded items.",
                     },
                 },
-                "description": "Initial data for render(state). \"items\" is host-managed; add any other keys your code needs — they pass through on every later state push.",
+                "description": "Initial data for render(state). Any other keys you add pass through on every later state push.",
             },
         },
         "required": ["style", "code", "state"],

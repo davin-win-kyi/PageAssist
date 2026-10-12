@@ -2,15 +2,24 @@
 // actually uses, and the one-shot request that asks the active tab's content script for its page
 // elements.
 
-export type PageElement = { id: string; selector: string; tag: string; text: string; role?: string; accessibleName?: string; visible?: boolean }
-export type PageElementsResponse = { url: string; title: string; elements: PageElement[]; pageText?: string; frames?: { sameOrigin: number; crossOrigin: number } }
+// Mirrors lib/page-scan.ts's ScannedElement / ScannedContainer — what the content script sends.
+export type PageElement = {
+  id: string; selector: string; tag: string; text: string; role?: string; accessibleName?: string
+  description?: string; completion_status?: string; container?: string; visible?: boolean
+}
+export type PageContainer = { selector: string; tag: string; role?: string; label?: string; parent?: string }
+export type PageElementsResponse = {
+  url: string; title: string; elements: PageElement[]; containers?: PageContainer[]
+  pageText?: string; frames?: { sameOrigin: number; crossOrigin: number }
+}
 export type RuntimeMessage = {
   type?: string
   ok?: boolean
   event?: {
     type: string; url: string; structural?: boolean
     fieldsAdded?: number; fieldsRemoved?: number
-    addedFields?: PageElement[]; removedFields?: string[]
+    addedFields?: PageElement[]; revealedFields?: PageElement[][]; removedFields?: string[]
+    addedContainers?: PageContainer[]
     target?: Record<string, unknown>; payload?: Record<string, unknown>
   }
 }
@@ -76,6 +85,9 @@ async function ensureContentScriptInjected(tabId: number): Promise<void> {
   }
 }
 
+/*
+This method allows one to get the page Elements which are later used for the task representation
+*/
 export async function requestPageElements(): Promise<PageElementsResponse | undefined> {
   const tabId = await activeTabId()
   if (tabId === undefined) return undefined

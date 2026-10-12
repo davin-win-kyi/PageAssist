@@ -1,4 +1,4 @@
-"""TaskWeb API — thin assembly point.
+"""PageAssist API — thin assembly point.
 
 - api/endpoints/    — the four FastAPI routers (one module per domain)
 - api/state/        — in-process state: getters/setters for the task representation, the interface
@@ -19,7 +19,7 @@ from api.endpoints import chat as chat_endpoint
 from api.endpoints import interface_representation as interface_representation_endpoint
 from api.endpoints import webpage_interface as webpage_interface_endpoint
 
-app = FastAPI(title="TaskWeb API", version="0.1.0")
+app = FastAPI(title="PageAssist API", version="0.1.0")
 app.add_middleware(CORSMiddleware, allow_origins=["http://localhost:5173"], allow_methods=["*"], allow_headers=["*"])
 
 app.include_router(task_endpoint.router)

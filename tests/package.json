@@ -1,5 +1,5 @@
 {
-  "name": "taskweb-tests",
+  "name": "pageassist-tests",
   "private": true,
   "type": "module",
   "description": "Node test scripts for plugin/ (backend tests are plain Python, see tests/backend/).",

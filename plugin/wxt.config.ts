@@ -3,14 +3,14 @@ import { defineConfig } from 'wxt';
 export default defineConfig({
   modules: ['@wxt-dev/module-react'],
   manifest: {
-    name: 'TaskWeb Studio',
+    name: 'PageAssist Studio',
     description: 'Author and patch webpage interfaces through linked representations.',
     // webNavigation is specifically needed for onHistoryStateUpdated — chrome.tabs.onUpdated does not
     // fire for single-page apps that change the URL via history.pushState (verified live).
     permissions: ['activeTab', 'storage', 'scripting', 'webNavigation'],
     host_permissions: ['<all_urls>'],
     action: {
-      default_title: 'Open TaskWeb Studio',
+      default_title: 'Open PageAssist Studio',
     },
     // Pages listed here run with the relaxed CSP Chrome grants sandboxed extension pages (permits
     // 'unsafe-eval', which the widget sandbox's one deliberate `new Function(...)` call needs) — the

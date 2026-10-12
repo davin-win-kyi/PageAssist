@@ -25,6 +25,7 @@ class ChatDecision(BaseModel):
     reply: str
     suggestions: list[str] = []
     interface_representation: dict[str, Any] | None = None
+    tree_needs_update: bool = False
     agreed: bool = False
     offer_save: bool = False
     suggested_name: str = ""
@@ -32,54 +33,61 @@ class ChatDecision(BaseModel):
 
 CHAT_DECISION_TOOL = {
     "name": "respond_and_update_interface",
-    "description": "Reply to the user and report whether/how the interface representation should change.",
+    "description": "Reply to the user and report whether the interface representation changed.",
     "input_schema": {
         "type": "object",
         "properties": {
-            "reply": {"type": "string", "description": "The concise, precise reply to show the user."},
+            "reply": {"type": "string", "description": "What the user sees: at most 2-3 short sentences."},
             "suggestions": {
-                "type": "array",
-                "items": {"type": "string"},
-                "maxItems": 3,
-                "description": "At most 3 quick-reply chips, each 1-4 words (e.g. \"Checklist\", \"Progress bar\", \"Both\"). Never full sentences.",
+                "type": "array", "items": {"type": "string"}, "maxItems": 3,
+                "description": "Up to 3 quick replies, 1-4 words each, e.g. \"Checklist\", \"Progress bar\".",
             },
             "interface_representation": {
                 "type": ["object", "null"],
-                "description": (
-                    "The full updated {component, description, style, preferences, children} tree, ONLY "
-                    "when this reply actually changes it; null otherwise — including a turn that merely "
-                    "confirms it ('looks good', 'yes, save that'). Non-null re-triggers showing the widget "
-                    "on the page, so resending an unchanged tree makes that happen for no reason. Not tied "
-                    "to `agreed`, which stays true across many later turns this must stay null on. "
-                    "\"preferences\" is short phrases (never literal instance text — the representation is "
-                    "structure-independent). \"description\" is one sentence on what this support is and "
-                    "does (useful when \"component\" is a bespoke name). \"children\" are structural "
-                    "groupings generic to the kind of task (e.g. \"a section for the first person\"), never "
-                    "concrete real-page items."
-                ),
+                "description": "The full {component, description, style, preferences, children} tree on a turn that changes it; null on every other turn.",
+            },
+            "tree_needs_update": {
+                "type": "boolean",
+                "description": "True when `reply` says or implies the tree changed, including the turn a strategy is picked; false otherwise.",
             },
             "agreed": {
                 "type": "boolean",
-                "description": "True only on the turn the user has just confirmed a specific concrete support concept.",
+                "description": "True once the user has settled on a strategy; false while they're still describing or choosing. Stays true once set.",
             },
-            "offer_save": {
-                "type": "boolean",
-                "description": (
-                    "True when the concept is agreed and has been stable for a turn or two (or the user said it "
-                    "looks good) — the client shows a one-click Save affordance. Keep false otherwise, and once "
-                    "the user has saved or declined."
-                ),
-            },
+            "offer_save": {"type": "boolean", "description": "True only on the turn you offer to save the interface."},
             "suggested_name": {
                 "type": "string",
-                "description": (
-                    "A short, human-readable name for this support concept — 2-5 words describing what it is "
-                    "and does, e.g. \"Field completion checklist\", \"Two-person section tracker\", \"Next-step "
-                    "prompt\". Set it on every turn where offer_save is true; leave \"\" otherwise. Not a "
-                    "generic label like \"Interface 1\"."
-                ),
+                "description": "2-5 words naming what the support does, e.g. \"Field completion checklist\", when offer_save is true; \"\" otherwise.",
             },
         },
-        "required": ["reply", "suggestions", "agreed"],
+        "required": ["reply", "suggestions", "agreed", "tree_needs_update"],
+    },
+}
+
+
+# Repair-path tool (see chat/router.py's _repair_interface_tree): used only when the main call above
+# says the tree changed (`tree_needs_update`) but sends no tree — observed live and reproducibly on
+# Gemini, which does NOT self-correct when the same combined call is retried. Asking for ONLY the
+# tree, split out of the reply/suggestions/agreed schema, reliably fills it. Its rules are
+# INTERFACE_REPRESENTATION_GUIDE (definitions/interface_representation/prompts.py).
+INTERFACE_TREE_TOOL = {
+    "name": "build_interface_representation",
+    "description": "Return the full interface representation tree.",
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "component": {"type": "string", "description": "Short slug for what the support is, e.g. \"checklist\"."},
+            "description": {"type": "string", "description": "One sentence on what the support does."},
+            "style": {"type": "object", "description": "CSS properties and values the user asked for."},
+            "preferences": {
+                "type": "array", "items": {"type": "string"},
+                "description": "Short phrases for what the node shows or how it behaves. Never page-specific.",
+            },
+            "children": {
+                "type": "array", "items": {"type": "object"},
+                "description": "Generic parts of the support, each a node of this same shape. Never one per page item.",
+            },
+        },
+        "required": ["component", "description", "preferences"],
     },
 }

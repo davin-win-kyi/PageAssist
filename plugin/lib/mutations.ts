@@ -1,9 +1,7 @@
-// Turns a MutationRecord into the compact JSON shape the backend / panel reason about when deciding
-// whether a page change is structural and task-relevant. Pure.
-import { computeSelector } from './selectors.ts';
+import { computeSelector, stableSelector } from './selectors.ts';
+import { FIELD_NODE_SELECTOR, isInTransientLayer } from './page-scan.ts';
 
-// A short, human-ish selector for a mutation target (logging / coarse identity). Distinct from
-// computeSelector — this one is lossy on purpose and never used for lookup.
+// this is to get the selector of an element
 export function getSelector(element: Element | null): string {
   if (!element || element.nodeType !== Node.ELEMENT_NODE) return 'document';
   if (element.id) return `#${element.id}`;
@@ -11,42 +9,65 @@ export function getSelector(element: Element | null): string {
   return element.tagName.toLowerCase();
 }
 
-// Does this node, or anything in its subtree, look like a form control? A sharper "structural change
-// relevant to the task" signal than a raw node count. Includes class-only custom widgets (a revealed
-// react-select / div.select_container is a single node with no ARIA role). Nodes inside an open
-// dropdown/popover are excluded — their appearance is an expansion, not new page structure.
-export const FORM_CONTROL_SELECTOR = 'input, textarea, select, [role="textbox"], [role="combobox"], [role="checkbox"], [role="radio"], [role="switch"], [contenteditable="true"], [class*="select" i], [class*="dropdown" i], [class*="combobox" i]';
-const POPUP_SELECTOR = '[role="listbox"], [role="menu"], [role="tooltip"], [aria-modal="true"], [class*="menu" i], [class*="popover" i], [class*="popup" i], [class*="tooltip" i], [class*="option-list" i], [class*="options-list" i]';
-export function containsFormControl(node: Node): boolean {
-  if (node.nodeType !== Node.ELEMENT_NODE) return false;
-  const element = node as Element;
+/*
+Return the correct element for the mutation that occured
+*/
+function targetElement(node: Node): Element | null {
+  if (node.nodeType === Node.ELEMENT_NODE) return node as Element;
+  if (node.nodeType === Node.DOCUMENT_FRAGMENT_NODE) return (node as ShadowRoot).host ?? null;
+  return node.parentElement;
+}
+
+/*
+Removes anything that is not a form controls in that element
+- it gets all of the changes from the mutation 
+- and then it tries to look at the input element of the mutation, and 
+  it will return that to the user
+*/
+function controlsIn(node: Element): Element[] {
   try {
-    if (element.closest?.(POPUP_SELECTOR)) return false;
-    return !!element.matches?.(FORM_CONTROL_SELECTOR) || !!element.querySelector?.(FORM_CONTROL_SELECTOR);
+    return [node, ...node.querySelectorAll(FIELD_NODE_SELECTOR)]
+      .filter((control) => control.matches(FIELD_NODE_SELECTOR) && !isInTransientLayer(control));
   } catch {
-    return false;
+    return [];
   }
 }
 
+// Get the ID of the removed element, this is also considered a mutation
+function removedIdentity(element: Element): string | null {
+  const selector = computeSelector(element);
+  return selector === element.tagName.toLowerCase() ? null : selector;
+}
+
+const elementsOf = (nodes: NodeList): Element[] =>
+  [...nodes].filter((node): node is Element => node.nodeType === Node.ELEMENT_NODE);
+const distinct = (selectors: (string | null)[]): string[] =>
+  [...new Set(selectors.filter((s): s is string => !!s))].slice(0, 20);
+
+/*
+The following is used in order to determine how a mutation should be reported back to the user 
+- and this is used to determine whether or not the interface should be updated or not 
+*/
 export function describeMutation(mutation: MutationRecord) {
-  const target = mutation.target.nodeType === Node.TEXT_NODE ? mutation.target.parentElement : mutation.target as Element;
-  // Selectors of added element nodes (same computeSelector() used for analysis), so the backend can
-  // tell whether a change touched an element the current task representation actually tracks.
-  const addedSelectors = [...mutation.addedNodes]
-    .filter((node): node is Element => node.nodeType === Node.ELEMENT_NODE)
-    .slice(0, 10)
-    .map(computeSelector);
+  const target = targetElement(mutation.target);
+  const added = elementsOf(mutation.addedNodes);
+  const removed = elementsOf(mutation.removedNodes);
+  const addedControls = added.flatMap(controlsIn);
+  const removedControls = removed.flatMap(controlsIn);
   return {
     type: mutation.type,
     target: getSelector(target),
-    targetSelector: target ? computeSelector(target) : null,
-    addedSelectors,
+    // stable identities, matchable against the task representation's selectors: the controls inside an
+    // added/removed subtree, then the subtree roots themselves
+    targetSelector: target ? stableSelector(target) : null,
+    addedSelectors: distinct([...addedControls, ...added].map(stableSelector)),
+    removedSelectors: distinct([...removedControls, ...removed].map(removedIdentity)),
     attribute: mutation.attributeName || null,
     oldValue: mutation.oldValue || null,
     addedNodes: mutation.addedNodes.length,
     removedNodes: mutation.removedNodes.length,
-    formControlsAdded: [...mutation.addedNodes].filter(containsFormControl).length,
-    formControlsRemoved: [...mutation.removedNodes].filter(containsFormControl).length,
+    formControlsAdded: addedControls.length,
+    formControlsRemoved: removedControls.length,
     text: mutation.type === 'characterData' ? mutation.target.textContent?.slice(0, 160) : null,
   };
 }

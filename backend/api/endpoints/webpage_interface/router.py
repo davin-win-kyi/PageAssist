@@ -10,6 +10,7 @@ from api.state.task import task_store
 from api.state.interface_representation import get_active_tree
 from api.state.webpage_interface import get_webpage_interface, set_webpage_interface
 from api.utils.llm import get_client_and_model, create_message
+from definitions.task import PAGE_TEXT_LIMIT
 from definitions.webpage_interface import WEBPAGE_INTERFACE_GUIDE, WEBPAGE_INTERFACE_TOOL
 
 router = APIRouter()
@@ -42,14 +43,13 @@ async def model_webpage_interface(
         return None
     try:
         user_message = (
-            "These are the user's interface PREFERENCES (page-agnostic — realize them for this page):\n"
+            "INTERFACE REPRESENTATION (what the user wants, page-agnostic):\n"
             f"{json.dumps(interface_representation)}\n\n"
-            "This is the TASK REPRESENTATION of the current page (grounded in its real elements):\n"
+            "TASK REPRESENTATION (this page, grounded in its real elements):\n"
             f"{json.dumps(task_representation)}\n\n"
             + ((
-                "This is the readable TEXT of the page (use it for items that are page CONTENT, not "
-                "form fields — recipe steps, article sections — whose done-state the user toggles):\n"
-                f"{page_text[:12000]}\n\n") if page_text else "")
+                "PAGE TEXT (for manual items: page content with no control):\n"
+                f"{page_text[:PAGE_TEXT_LIMIT]}\n\n") if page_text else "")
             + "Produce the widget via the build_webpage_interface tool."
         )
         response = await create_message(
@@ -103,16 +103,13 @@ def _bundled_selector_groups(task_representation: dict[str, Any]) -> dict[str, l
 
 
 def enforce_bundled_selectors(items: list[dict[str, Any]], task_representation: dict[str, Any]) -> list[dict[str, Any]]:
-    """The prompt asks the model to use `selectors: [...]` (not a single `selector`) for an item that
-    answers one question via more than one required control (first + last name; a phone number's
-    country + number) — but this call has no schema-validation retry loop (its output is executable
-    code, not a closed schema), so the model doesn't always comply, and when it picks a single control
-    to ground on there's no way to know in advance whether it picked the genuinely-answered one or an
-    auxiliary one with a quietly-defaulted value (a country-code picker isn't reliably pre-filled —
-    e.g. Greenhouse's own phone widget ships it blank). Re-derive the grouping straight from the task
-    representation's own `member_selectors` (data we already trust) and upgrade any item naming ONE
-    member of a bundle to `selectors` naming every member of that bundle — this makes which single
-    control the model happened to pick irrelevant, since the item now requires all of them regardless."""
+    """A question answered by more than one control (first + last name; a date's month + year; a
+    phone number's country + number) must count complete only once ALL of them are filled. The model
+    grounds each item on one `selector` and isn't asked to bundle; this derives the bundles straight
+    from the task representation's own `member_selectors` (data we already trust) and upgrades any
+    item naming ONE member of a bundle to `selectors` naming every member. Which single control the
+    model happened to pick is then irrelevant — a country-code picker isn't reliably pre-filled (e.g.
+    Greenhouse's own phone widget ships it blank), so all of them are required regardless."""
     groups = _bundled_selector_groups(task_representation)
     fixed: list[dict[str, Any]] = []
     for item in items:
@@ -129,12 +126,16 @@ def enforce_bundled_selectors(items: list[dict[str, Any]], task_representation: 
     return fixed
 
 
-def components_to_items(task_representation: dict[str, Any], limit: int = 20) -> list[dict[str, Any]]:
+def components_to_items(task_representation: dict[str, Any]) -> list[dict[str, Any]]:
     """One tracked item per component (each form question is its own component), using the best
     form-control-ish selector(s) available and the component's own label. When a component genuinely
     bundles more than one control (a first+last name pair, a split address — see the guide's
     form-question exception), track ALL of them via `selectors` rather than picking just one; a
-    single selector can only ever reflect one part of a multi-control answer."""
+    single selector can only ever reflect one part of a multi-control answer.
+
+    No item cap: the task representation has none either, and any fixed cap silently drops whatever
+    sits past it — on a long form that's exactly a question revealed late (a follow-up appended
+    after the first 20). A list taller than the frame scrolls inside it."""
     items: list[dict[str, Any]] = []
     seen: set[str] = set()
     for component in task_representation.get("components", []):
@@ -153,8 +154,6 @@ def components_to_items(task_representation: dict[str, Any], limit: int = 20) ->
                 continue
             seen.add(selector)
             items.append({"selector": selector, "label": label})
-        if len(items) >= limit:
-            break
     return items
 
 
@@ -175,7 +174,7 @@ def fallback_webpage_interface(
         "code": FALLBACK_WIDGET_CODE,
         "degraded": True,
         "state": {
-            "note": "TaskWeb couldn't build the support for this page.",
+            "note": "PageAssist couldn't build the support for this page.",
             "detail": "Showing the fields it found — try again in a moment.",
             "items": items,
         },

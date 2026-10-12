@@ -14,7 +14,8 @@
  *   3. Apply + keep the widget current — on explicit agreement (in chat, or activating a saved
  *      entry) it calls POST /webpage-interfaces/{id}/generate and pushes the result to the content
  *      script (pushWebpageInterface). A PAGE_CHANGED message with `structural: true` (a real field
- *      appeared/disappeared) re-syncs the representation and regenerates; a WIDGET_STATE_CHANGED
+ *      appeared/disappeared) patches the representation and splices the change into the widget on
+ *      the page (regenerating only when it can't); a WIDGET_STATE_CHANGED
  *      message (a completion flag flipped) only surfaces a brief passive note — content.ts already
  *      updated the on-page checklist itself, with no model call.
  *
@@ -25,10 +26,12 @@
 import { useEffect, useRef, useState } from 'react'
 import { RefreshCw, Send, Sparkles } from 'lucide-react'
 import { API_URL, ANALYZE_TIMEOUT_MS, LLM_CALL_TIMEOUT_MS, fetchWithTimeout } from '../../lib/api'
+import type { WidgetItem } from '../../lib/widget-items'
 import {
   extensionChrome,
   requestPageElements,
   type PageElement as TaskElement,
+  type PageContainer,
   type RuntimeMessage,
   type TabUpdatedListener,
   type TabActivatedListener,
@@ -54,12 +57,12 @@ type InterfaceRepresentationResponse = { tree: InterfaceNode; agreed: boolean }
  * host-applied position/size for the outer frame only; "code" runs inside the sandboxed widget
  * iframe (see entrypoints/sandbox); "state" is what that code's render(state) receives, and what
  * the content script keeps live afterward. */
-type WidgetItem = { selector: string; label?: string; complete?: boolean }
 type WidgetState = { items?: WidgetItem[]; [key: string]: unknown }
 type Widget = { style: Record<string, string>; code: string; state: WidgetState }
 type Importance = 'primary' | 'supporting' | 'peripheral'
-/* Two-tier semantic model of the current page (see backend/definitions/task/). `tasks` are coarse
- * goals; `components` carry per-question granularity — each form field is its own component. */
+/* Semantic model of the current page (see backend/definitions/task/). `tasks` are coarse goals;
+ * `components` carry per-question granularity — each form field is its own component; `relationships`
+ * link components (a follow-up depends_on the question that reveals it). */
 type TaskItem = {
   task_id: string
   label: string
@@ -71,6 +74,7 @@ type TaskItem = {
 }
 type TaskComponent = {
   component_id: string
+  component_type?: string
   semantic_role: string
   label?: string
   description?: string
@@ -80,11 +84,13 @@ type TaskComponent = {
   required_for_task?: 'true' | 'false' | 'unknown'
   importance?: Importance
 }
+type TaskRelationship = { type: 'depends_on' | 'precedes' | 'alternative_to'; source: string; target: string }
 type TaskNode = {
   page_purpose?: string
   page_type?: string
   tasks?: TaskItem[]
   components?: TaskComponent[]
+  relationships?: TaskRelationship[]
   modeling_notes?: string
 }
 type ChatEntry = { id: string; role: 'user' | 'assistant'; text: string; suggestions?: string[]; offerSave?: boolean; suggestedName?: string }
@@ -230,6 +236,21 @@ function App() {
     pushWebpageInterface(widget)
   })
 
+  /* Splice a page change into the widget already on the page (content.ts updateWidgetItems) instead
+   * of regenerating it. Resolves `ok: false` when the content script can't (no widget, or one that
+   * doesn't track page elements) or doesn't answer — the caller regenerates instead. */
+  type ItemUpdate = { ok: boolean; added: number; removed: number }
+  const updateWidgetItemsOnPage = (add: WidgetItem[], remove: string[]): Promise<ItemUpdate> => new Promise(resolve => {
+    const failed: ItemUpdate = { ok: false, added: 0, removed: 0 }
+    extensionChrome?.tabs?.query({ active: true, currentWindow: true }, tabs => {
+      const tabId = tabs[0]?.id
+      if (tabId === undefined) return resolve(failed)
+      extensionChrome.tabs?.sendMessage(tabId, { type: 'UPDATE_WIDGET_ITEMS', add, remove }, (response?: ItemUpdate) => {
+        resolve(extensionChrome.runtime?.lastError || !response ? failed : response)
+      })
+    })
+  })
+
   /* `degraded` = the backend's model call failed and it returned the deterministic fallback widget;
    * the panel says so plainly rather than pretending it's a normal result. */
   const generateWebpageInterface = async (id: string): Promise<{ applied: boolean; degraded: boolean }> => {
@@ -339,9 +360,10 @@ function App() {
      * with nothing modelled, OR nothing was modelled at all yet the page returned elements — a bare
      * shell still booting). Each points at "still hydrating", not "genuinely a page with no form". */
     const formish = /form|application|checkout|onboarding|signup|sign-up/.test((site.task.page_type || '').toLowerCase())
-    /* A bare JS shell still booting returns only a handful of nodes and nothing modelled — distinct
-     * from a real content page (many nodes, no form). */
-    const looksLikeShell = components === 0 && site.elementCount > 0 && site.elementCount < 15
+    /* A bare JS shell still booting returns only a handful of nodes (often none — an empty #root has
+     * nothing the scan collects) and nothing modelled — distinct from a real content page (many
+     * nodes, no form). */
+    const looksLikeShell = components === 0 && site.elementCount < 15
     return components < 3 && (site.inputish >= 2 || site.sameOriginFrames > 0 || (formish && components === 0) || looksLikeShell)
   }
 
@@ -373,20 +395,25 @@ function App() {
    * file-upload button row swapping for a "<filename> ×" chip within an already-modelled question)
    * — the task representation itself didn't gain or lose a component, so there's nothing worth
    * regenerating the widget for. */
-  const patchTaskRepresentation = async (added: TaskElement[], removed: string[]): Promise<{ task: TaskNode; changed: boolean } | null> => {
+  const patchTaskRepresentation = async (
+    added: TaskElement[],
+    removed: string[],
+    revealed: TaskElement[][],
+    containers: PageContainer[],
+  ): Promise<{ task: TaskNode; changed: boolean; addedItems: WidgetItem[] } | null> => {
     const id = siteIdRef.current
-    if (!id || (added.length === 0 && removed.length === 0)) return null
+    if (!id || (added.length === 0 && removed.length === 0 && revealed.length === 0)) return null
     try {
       const response = await fetchWithTimeout(`${API_URL}/task-representations/${encodeURIComponent(id)}/patch`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ added, removed }),
+        body: JSON.stringify({ added, removed, revealed, containers }),
       }, LLM_CALL_TIMEOUT_MS)
       if (!response.ok) return null
-      const { changed, ...task } = await response.json() as TaskNode & { changed?: boolean }
+      const { changed, added_items, ...task } = await response.json() as TaskNode & { changed?: boolean; added_items?: WidgetItem[] }
       setTaskRepresentation(task)
       lastAnalyzeAtRef.current = Date.now()
-      return { task, changed: changed !== false }
+      return { task, changed: changed !== false, addedItems: Array.isArray(added_items) ? added_items : [] }
     } catch (error) {
       console.error('Unable to patch task representation', error)
       return null
@@ -511,6 +538,8 @@ function App() {
       fieldsAdded: number,
       addedFields: TaskElement[] = [],
       removedFields: string[] = [],
+      revealedFields: TaskElement[][] = [],
+      containers: PageContainer[] = [],
     ) => {
       /* A genuinely new field (fieldsAdded > 0) always runs; a removal-only change respects a short
        * cooldown so a burst of conditional-field toggling doesn't churn. */
@@ -527,21 +556,30 @@ function App() {
          * full re-analyze if we don't have the field descriptors, or the patch call fails. */
         let task: TaskNode | undefined
         let noRealChange = false
-        if (siteIdRef.current && (addedFields.length > 0 || removedFields.length > 0)) {
-          const patched = await patchTaskRepresentation(addedFields, removedFields)
-          if (patched) { task = patched.task; noRealChange = !patched.changed }
+        let addedItems: WidgetItem[] | undefined /* set only when the patch succeeded */
+        if (siteIdRef.current && (addedFields.length > 0 || removedFields.length > 0 || revealedFields.length > 0)) {
+          const patched = await patchTaskRepresentation(addedFields, removedFields, revealedFields, containers)
+          if (patched) { task = patched.task; noRealChange = !patched.changed; addedItems = patched.addedItems }
         }
         if (!task && !noRealChange) {
           const site = await analyzeCurrentSite(true) /* full re-model */
           task = site.hasPage ? site.task : undefined
         }
         if (task) staleTaskRepRef.current = false
-        if (noRealChange) {
+        /* A patched change only added/removed questions: splice them into the widget on the page
+         * (~1s) rather than regenerating it (~70s at medium thinking). A full re-analyze, or a widget
+         * the splice can't handle, still regenerates below. */
+        const spliced = !noRealChange && addedItems && hasWidget && widgetSiteIdRef.current === siteId
+          ? await updateWidgetItemsOnPage(addedItems, removedFields)
+          : undefined
+        if (noRealChange || (spliced?.ok && spliced.added + spliced.removed === 0)) {
           /* The DOM change was cosmetic (e.g. a file-upload button row swapping for a
-           * "<filename> ×" chip) — the task representation didn't actually gain/lose a component.
-           * Settle quietly rather than claiming an update happened, or burning a /generate call for
-           * nothing. */
+           * "<filename> ×" chip), or nothing it brought belongs in the widget — the task
+           * representation didn't gain/lose a question the widget shows. Settle quietly rather than
+           * claiming an update happened, or burning a /generate call for nothing. */
           if (hasWidget) setApplyPhase('idle')
+        } else if (spliced?.ok) {
+          finishApply(true, '✓ Support updated for the page change.')
         } else if (task && siteIdRef.current && widgetSiteIdRef.current === siteId) {
           const { applied, degraded } = await generateWebpageInterface(siteIdRef.current)
           finishApply(applied, degraded ? DEGRADED_TEXT : '✓ Support updated for the page change.')
@@ -599,6 +637,8 @@ function App() {
           Number(message.event.fieldsAdded) || 0,
           message.event.addedFields ?? [],
           message.event.removedFields ?? [],
+          message.event.revealedFields ?? [],
+          message.event.addedContainers ?? [],
         )
       }
     }
@@ -661,7 +701,6 @@ function App() {
          * disabled. */
         setIsThinking(false)
         if (willApply) {
-          appliedTreeJsonRef.current = treeJson
           setApplyPhase('applying')
           /* Generate from the page as it is NOW. Re-analyze when there's no analysis yet, or a
            * structural change has been seen since the last one — otherwise the widget is built from
@@ -677,6 +716,12 @@ function App() {
           }
           if (id) {
             const { applied, degraded } = await generateWebpageInterface(id)
+            /* Only commit the guard on a CONFIRMED apply — recording it on every attempt (regardless
+             * of outcome) used to permanently block retries after one failure: a later turn whose
+             * model output happens to match this same tree (very likely on a near-identical retry
+             * message, since this is a low-variance forced tool call) would see `willApply` false and
+             * silently skip applying — no error, no "Applying…" message, nothing. */
+            if (applied) appliedTreeJsonRef.current = treeJson
             pushReply()
             finishApply(applied, degraded ? DEGRADED_TEXT : undefined)
           } else {
@@ -814,9 +859,6 @@ function App() {
         setAgreed(payload.agreed)
         setInterfaceComponent(payload.tree?.component || '')
         setInterfaceDescription(payload.tree?.description || '')
-        /* So a later "looks good" chat turn (if the model resends this same tree) doesn't
-         * re-trigger "Applying the change to the page…" — this activation is already applying it. */
-        appliedTreeJsonRef.current = payload.tree ? JSON.stringify(payload.tree) : ''
         setActiveSourceId(item.id)
         setActiveSourceName(item.name)
         setTranscript([{ id: 'intro', role: 'assistant', text: `Switched to "${item.name}". Continue refining it, or describe something new.` }])
@@ -839,6 +881,9 @@ function App() {
             ok = false
           }
         }
+        /* Only commit the guard on a CONFIRMED apply — see the matching comment in sendMessage's
+         * willApply block for why recording it unconditionally blocks later retries. */
+        if (ok) appliedTreeJsonRef.current = payload.tree ? JSON.stringify(payload.tree) : ''
         finishApply(ok, degradedText)
       })
       .catch(error => { console.error('Unable to activate interface representation', error); finishApply(false) })
@@ -882,7 +927,7 @@ function App() {
         <div className="chat-header-identity">
           <span className="chat-avatar" aria-hidden="true"><Sparkles size={16} /></span>
           <div>
-            <h1>TaskWeb assistant</h1>
+            <h1>PageAssist assistant</h1>
             <p className="chat-subtitle">{subtitle}</p>
           </div>
         </div>
@@ -894,7 +939,7 @@ function App() {
         </div>
       </header>
 
-      <div className="tab-bar" role="tablist" aria-label="TaskWeb views">
+      <div className="tab-bar" role="tablist" aria-label="PageAssist views">
         <button type="button" role="tab" id="tab-chat" aria-selected={activeTab === 'chat'} aria-controls="panel-chat" onClick={() => setActiveTab('chat')}>Chat</button>
         <button type="button" role="tab" id="tab-saved" aria-selected={activeTab === 'saved'} aria-controls="panel-saved" onClick={() => setActiveTab('saved')}>Saved</button>
       </div>
@@ -926,7 +971,7 @@ function App() {
             ))}
             {isThinking && (
               <div className="bubble-row assistant">
-                <div className="bubble typing" aria-label="TaskWeb is typing">
+                <div className="bubble typing" aria-label="PageAssist is typing">
                   <span /><span /><span />
                 </div>
               </div>

@@ -1,4 +1,4 @@
-# TaskWeb backend
+# PageAssist backend
 
 FastAPI service that turns pages and preferences into concrete widgets via Claude. See the
 [top-level README](../README.md) for what the three representations are and how the whole system fits
@@ -111,12 +111,13 @@ backend/
 
 | File | Purpose |
 |---|---|
-| `task/prompts.py` | `TASK_REPRESENTATION_GUIDE` — how to read a page into tasks/components |
+| `task/prompts.py` | `TASK_REPRESENTATION_GUIDE` / `PATCH_TASK_REPRESENTATION_GUIDE` — how to read a page (or a few new elements) into tasks, components and relationships |
 | `task/schema.py` | the task representation's Pydantic models + tool `input_schema` |
-| `chat/prompts.py` | `TASKWEB_GUIDE` — how to hold the conversation, when to set `agreed` |
+| `chat/prompts.py` | `PAGEASSIST_GUIDE` — how to hold the conversation, when to set `agreed`; ends with the interface representation's rules |
 | `chat/schema.py` | `Chat*` models + the `respond_and_update_interface` tool |
-| `interface_representation/schema.py` | `SaveInterfaceRepresentationRequest`; `prompts.py` is a stub (no prompt) |
-| `webpage_interface/prompts.py` | `WEBPAGE_INTERFACE_GUIDE` — how to turn preferences + page into a widget |
+| `interface_representation/prompts.py` | `INTERFACE_REPRESENTATION_RULES` — the tree's rules, shared by `PAGEASSIST_GUIDE` and the tree-repair call (`INTERFACE_REPRESENTATION_GUIDE`) |
+| `interface_representation/schema.py` | `SaveInterfaceRepresentationRequest` |
+| `webpage_interface/prompts.py` | `WEBPAGE_INTERFACE_GUIDE` — how to turn the interface representation + page into a widget |
 | `webpage_interface/schema.py` | the `build_webpage_interface` tool's `input_schema` |
 
 **`data/`** — runtime JSON (git-ignored), the on-disk form of `api/state/`'s dicts:
@@ -141,7 +142,7 @@ that confusion.
 |---|---|
 | `GET /health` | liveness |
 | `POST /task-representations/{site_id}/analyze` | Build this page's **task representation** from its real elements; replaces the single stored slot. Body may include `page_text` (the page's readable prose), stored for widget generation. This is the expensive, full-model call — used on first load of a page and whenever the page has changed enough that a partial patch wouldn't be trustworthy. |
-| `POST /task-representations/{site_id}/patch` | Fast path — splice just-added fields in / drop removed ones (small/fast model + deterministic fallback) instead of re-modelling the whole page. Returns the full updated representation plus `changed: bool` (false when the flagged DOM change turned out cosmetic — nothing was actually added/removed, so the caller shouldn't bother regenerating the widget). |
+| `POST /task-representations/{site_id}/patch` | Fast path — splice just-added fields in / drop removed ones (small/fast model + deterministic fallback) instead of re-modelling the whole page. Returns the full updated representation plus `changed: bool` (false when the flagged DOM change turned out cosmetic — nothing was actually added/removed, so the caller shouldn't bother regenerating the widget) and `added_items` (the new components as widget items, which the panel splices into the widget already on the page instead of regenerating it). |
 | `GET /task-representations/{site_id}` | Read the stored task representation (404 if it's for another site). |
 | `GET /interface-representation` | The active **interface representation** (the working preference tree) + its `agreed` flag. |
 | `POST /interface-representation/reset` | Blank the active tree, clear `agreed`, truncate `chat_log.jsonl` — this is what "new chat" / "end chat and start over" calls. |
@@ -159,7 +160,7 @@ that confusion.
 
 ## The three representations — what each one is for
 
-TaskWeb's whole pipeline is three progressively more concrete objects, each built from the one before
+PageAssist's whole pipeline is three progressively more concrete objects, each built from the one before
 it (see the [top-level README](../README.md) for the end-to-end picture; this section is what each one
 *is* and why it exists as its own thing rather than being folded into another; see How it works above
 for the shapes of the first two side by side).
@@ -172,7 +173,8 @@ for the shapes of the first two side by side).
   downstream — the chat, the widget — can talk about "this page's fields" without re-parsing the DOM
   itself, and so the model never has to assert whether a field is filled (the client reads that live).
   One page's worth lives in the store at a time; a new `site_id` replaces it.
-- **Interface representation** (`definitions/chat/`, `api/state/interface_representation.py`) — the
+- **Interface representation** (`definitions/interface_representation/` for its rules, built by
+  `definitions/chat/`'s conversation; `api/state/interface_representation.py`) — the
   user's *page-agnostic* preferences for what kind of support they want and how it should behave (a
   short tree: `component` slug, human-readable `description`, `style`, `preferences` phrases,
   `children` for structural grouping). This is deliberately **not** grounded in any one page's
@@ -209,6 +211,13 @@ All three go through `api/utils/llm.py` → `create_message()`, which uses the *
 (`messages.stream`) — mandatory once `max_tokens` is large (the SDK hard-errors on big non-streaming
 requests). `max_tokens` is 32000 for all three.
 
+On Gemini, every call runs at `thinking_level="medium"` unless it asks for another level
+(`create_message(..., thinking_level=...)` / `call_structured_tool(..., thinking_level=...)`; the
+Anthropic branch ignores it). Only `/patch` asks — for `"low"`. Measured on a real Greenhouse form
+(median of 3): the task representation took 28s / 52s / 293s at low / medium / high and the widget
+20s / 71s / 156s, with the same coverage at medium and high; high's task representation ran past the
+panel's 240s timeout every time.
+
 `call_structured_tool()` is the shared pattern for the structured calls:
 
 1. Force a single tool with `tool_choice` — the model structurally cannot return prose or skip a
@@ -220,13 +229,22 @@ requests). `max_tokens` is 32000 for all three.
 
 Used by `analyze` (validates against `TaskRepresentationOut`) and `/chat` (`ChatDecision`).
 `webpage-interfaces/generate` uses forced tool-use without the retry loop (its output is executable
-code, not a closed schema); its user message is a labelled block (preferences, task representation,
-and — when stored — the page's `page_text`). Widget `state.items` may be **grounded** — a single
+code, not a closed schema); its user message is a labelled block (the interface representation, the
+task representation, and — when stored — the page's `page_text`). The guide has the model pick the
+task(s) the interface representation serves and build from their components; a page's own steps are
+reproduced in full unless the interface representation says otherwise. Widget `state.items` may be **grounded** — a single
 `selector`, or `selectors: [...]` when the item tracks a question answered by more than one control
 (first + last name, a split address); the host requires ALL listed selectors filled before the item
 counts complete, since one selector can only ever reflect one part of a multi-control answer — and
 host tracks `complete` from the DOM either way — or **manual** (`manual: true`, no selector/selectors;
-a recipe step / a section — the widget owns its checked state, the host never touches it).
+a recipe step / a section — the widget owns its checked state, the host never touches it). The host
+also sets `required` on every grounded item from the page itself (a `required` attribute,
+`aria-required`, or an asterisk in the question's label), so the model never guesses it; an optional
+`section` key is the model's own grouping, passed through untouched — the guide tells it to set any
+key its code groups by on every item. An optional `detail` carries fuller text copied from the page
+(the whole instruction: what to do, where to click, what the user will see), shown under the label;
+the guide requires it when the interface representation asks for detail or a walkthrough, and when a
+page's steps are made one item each, every instruction under a step goes in that item's `detail`.
 
 Because this call has no validation-retry loop, the model isn't always trusted to pick `selectors`
 correctly on its own — `build_webpage_interface` runs `enforce_bundled_selectors()` over the returned
@@ -253,33 +271,61 @@ no matter what the user types. (This is exactly what happened before this exclus
 This is the mechanism behind the adapting-to-changes example under How it works above:
 
 `/task-representations/{id}/patch` uses `get_fast_client_and_model()` (`ANTHROPIC_MODEL_FAST`, else
-`ANTHROPIC_MODEL`) with a tiny prompt that returns **only the new component(s)** for a few
+`ANTHROPIC_MODEL`; on Gemini, low thinking — ~2–4s, and it added a revealed question correctly every
+time at every level) with a tiny prompt that returns **only the new component(s)** for a few
 just-appeared elements (told to return an empty list when they aren't task-relevant); the router
 splices them in (and drops components for removed selectors), re-ids to avoid collisions, and links
 them to the primary task. Deterministic fallback: one `field-group` component per new control.
 `_remove_components` reports how many EXISTING components it actually dropped — a UI-only DOM swap
 inside an already-modelled question (a file-upload button row replaced by a "&lt;filename&gt; ×"
 chip) almost never matches a real component's selector, so `changed` comes back `false` and the panel
-skips regenerating the widget instead of claiming an update happened for nothing.
+skips regenerating the widget instead of claiming an update happened for nothing. `revealed` carries
+questions that were in the DOM but hidden and have come into view, grouped per question: a group
+with any control already mapped by a component is an availability change and adds nothing (so one
+unmapped option of a mapped radio group can't become a lone component); only fully unmapped groups
+join `added`. `containers` gives the patch prompt the same structural context the full analyze had.
+The response's `added_items` (`components_to_items` over just the new components) lets the panel
+splice the change into the widget already on the page — a page change that only adds or removes a
+question then takes seconds instead of a full widget regeneration (~70s at medium thinking).
 
 ### Task representation specifics
 
-- **Two tiers, flat lists, no count cap.** `tasks` are coarse goals (hierarchy via `parent_task_id`);
-  `components` are semantic groupings. `task_type` and `semantic_role` are **free strings** (short
-  kebab-case) — no fixed vocabulary. `importance` (primary/supporting/peripheral) and
-  `required_for_task` (true/false/unknown) stay closed `Literal`s.
+- **Flat lists, linked by id, no count cap.** `tasks` are coarse goals (hierarchy via
+  `parent_task_id`); `components` are semantic groupings; `relationships` link components. `task_type`
+  and `semantic_role` are **free strings** (short kebab-case). Closed `Literal`s: `importance`
+  (primary/supporting/peripheral), `required_for_task` (true/false/unknown), `component_type` (what
+  kind of thing it is, for widget generation: `text-` / `long-text-` / `single-choice-` /
+  `multi-choice-` / `toggle-` / `date-` / `file-question`, `step`, `content`, `heading`, `action`,
+  `navigation`, `status`, `media`) and the relationship `type` (`depends_on`: a follow-up that
+  applies only given another answer; `precedes`: the page's own order; `alternative_to`: either one
+  satisfies the need). Relationships need visible evidence; ones pointing at a missing component,
+  a self-link or a duplicate are dropped on validation, and removing a component drops its links.
 - **The form-question rule** (from the prompt): every individual form question is its **own**
   component — never bundled with adjacent questions — because per-field completion tracking targets
-  components individually. Only genuine sub-parts of one answer combine (street + city + state + zip →
-  one address). When a component's `member_selectors` do bundle more than one control this way, the
-  webpage-interface guide picks `selectors: [...]` over a single `selector` for that item (see above) —
-  otherwise the checklist would read the whole question done the moment just one part was filled.
+  components individually. Only genuine sub-parts of one answer combine (first + last name; an
+  address; a date's month + day + year; a phone number's country-code picker + number). When a
+  component's `member_selectors` do bundle more than one control this way, `enforce_bundled_selectors`
+  makes that question's widget item `selectors: [...]` (see above) — otherwise the checklist would
+  read the whole question done the moment just one part was filled.
+- **Dynamic UI** (from the prompt): what only appears while a control is in use — an open dropdown's
+  options, a date picker's calendar, suggestions, a tooltip, a validation message, an upload's file
+  chip — belongs to that control's component, never a component of its own.
+- **Prompts.** `TASK_REPRESENTATION_GUIDE` (analyze) and `PATCH_TASK_REPRESENTATION_GUIDE` share the
+  same element, component, relationship and requirement blocks, so a patched component is shaped
+  exactly like an analyzed one; the analyze guide ends with an example of the output JSON. The patch
+  is validated against the same component model (`PatchOut`) and may link a new component to an
+  existing one — a revealed follow-up `depends_on` the question that revealed it. If the model returns
+  no components (the new elements aren't task-relevant), nothing is added; the deterministic fallback
+  runs only when the call itself fails.
 - **Grounding.** Every `dom_selector` / `member_selector` is copied verbatim from an input node;
   prefer `visible` nodes; never assert a value, completion, or "required" without a visible marker.
   Completion is read live by the content script — there are no model-asserted status fields.
-- **Input pruning** is client-side: content.ts collects broadly, priority-sorts (form controls, form
-  structure, headings first; visible before hidden) and sends the top ≤500 as
-  `{id, selector, tag, text, role, accessibleName, visible}`; `analyze` re-caps at 500. The panel does
+- **Input pruning** is client-side: content.ts collects controls, labels, headings, prose, table
+  cells, images and role-bearing nodes, priority-sorts (controls, labels/legends, headings first;
+  visible before hidden) and sends the top ≤500 as `{id, selector, tag, text, role, accessibleName,
+  description, completion_status, container, visible}` plus a `containers` list (`{selector, tag, role,
+  label, parent}`) — each element's `container` points into it. `completion_status` is input context
+  only (as of the scan); the model never outputs completion. `analyze` re-caps at 500. The panel does
   extra forced re-analyzes when a form-heavy page comes back with suspiciously few components (still
   hydrating).
 

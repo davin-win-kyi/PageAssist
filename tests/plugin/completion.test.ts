@@ -9,7 +9,7 @@ for (const k of ['window', 'document', 'Element', 'Node', 'HTMLElement', 'HTMLIn
   (globalThis as Record<string, unknown>)[k] = (dom as Record<string, unknown>)[k];
 }
 
-const { isElementComplete, enclosingChoiceWidget, isItemComplete } = await import('../../plugin/lib/completion.ts');
+const { isElementComplete, enclosingChoiceWidget, isItemComplete, recordInitialValues } = await import('../../plugin/lib/completion.ts');
 
 let pass = 0;
 let fail = 0;
@@ -69,62 +69,9 @@ console.log('== 1. "Are you Hispanic/Latino?" completion (real react-select) =='
 }
 
 // ---------------------------------------------------------------------------------------------------
-// Structural detection: value-select must NOT count; a revealed field (race) MUST.
-// Mirrors the field-set diff in content.ts's handlePageChange.
-// ---------------------------------------------------------------------------------------------------
-const FIELD_ROLES = new Set(['textbox', 'combobox', 'checkbox', 'radio', 'searchbox', 'spinbutton', 'switch']);
-const POPUP_SELECTOR = '[role="listbox"], [role="menu"], [role="tooltip"], [aria-modal="true"], [class*="menu" i], [class*="popover" i], [class*="popup" i], [class*="tooltip" i], [class*="option-list" i], [class*="options-list" i]';
-const PAGE_ELEMENT_SELECTOR = 'a, button, input, textarea, select, option, label, fieldset, legend, form, h1, h2, h3, h4, h5, h6, [id], [data-testid], [aria-label], [aria-labelledby], [aria-required], [role], [contenteditable="true"]';
-
-function fieldSet(body: Element): Set<string> {
-  const els = [...body.querySelectorAll(PAGE_ELEMENT_SELECTOR)].filter((e) => !e.closest?.(POPUP_SELECTOR));
-  return new Set(
-    els
-      // No 'label' — a <label> is a control's accessible name, not a field of its own (see page-scan.ts).
-      .filter((e) => ['input', 'textarea', 'select', 'fieldset', 'legend'].includes(e.tagName.toLowerCase())
-        || FIELD_ROLES.has(e.getAttribute('role') || ''))
-      .map((e, i) => e.id || e.getAttribute('for') || `${e.tagName}#${i}`),
-  );
-}
-function diff(before: Set<string>, after: Set<string>) {
-  let added = 0;
-  let removed = 0;
-  after.forEach((s) => { if (!before.has(s)) added += 1; });
-  before.forEach((s) => { if (!after.has(s)) removed += 1; });
-  return { added, removed, structural: added + removed >= 1 };
-}
-
-const raceField = `
-  <div class="field">
-    <label id="race-label" for="race" class="label select__label">Please identify your race</label>
-    <div class="select__container"><div class="select__control"><div class="select__value-container">
-      <div class="select__placeholder">Select...</div>
-      <div class="select__input-container"><input id="race" role="combobox" type="text" value="" /></div>
-    </div></div></div>
-  </div>`;
-const openMenu = `
-  <div class="select__menu remix-css-menu"><div class="select__menu-list" role="listbox">
-    <div class="select__option" role="option" id="react-select-hispanic_ethnicity-option-0">Decline To Self Identify</div>
-    <div class="select__option" role="option" id="react-select-hispanic_ethnicity-option-1">Hispanic or Latino</div>
-    <div class="select__option" role="option" id="react-select-hispanic_ethnicity-option-2">Not Hispanic or Latino</div>
-  </div></div>`;
-
-console.log('\n== 2. structural change detection ==');
-{
-  const base = fieldSet(frag(EMPTY));
-  check('picking a value (placeholder -> single-value) is NOT structural',
-    diff(base, fieldSet(frag(FILLED))).structural, false);
-  check('opening the dropdown menu is NOT structural (options are in a popup)',
-    diff(base, fieldSet(frag(EMPTY + openMenu))).structural, false);
-  const afterRace = diff(base, fieldSet(frag(EMPTY + raceField)));
-  check('a revealed "race" field IS structural', afterRace.structural, true);
-  check('  and reports fieldsAdded = 1 (the combobox input; the <label> does not count)', afterRace.added, 1);
-}
-
-// ---------------------------------------------------------------------------------------------------
 // The extracted edge-case fixes from the AccessCrafter audit.
 // ---------------------------------------------------------------------------------------------------
-console.log('\n== 3. audit fixes ==');
+console.log('\n== 2. audit fixes ==');
 {
   const body = frag(`
     <fieldset id="veteran">
@@ -147,10 +94,10 @@ console.log('\n== 3. audit fixes ==');
 }
 
 // ---------------------------------------------------------------------------------------------------
-// 4. Greenhouse phone field: <input type="tel"> in a <fieldset> that ALSO holds a country-code
+// 3. Greenhouse phone field: <input type="tel"> in a <fieldset> that ALSO holds a country-code
 //    react-select with a default value. The default must NOT complete an empty phone number.
 // ---------------------------------------------------------------------------------------------------
-console.log('\n== 4. phone field next to a defaulted country dropdown ==');
+console.log('\n== 3. phone field next to a defaulted country dropdown ==');
 {
   const phoneFieldset = (phoneValue: string) => `
     <fieldset id="phone-fs">
@@ -181,10 +128,10 @@ console.log('\n== 4. phone field next to a defaulted country dropdown ==');
 }
 
 // ---------------------------------------------------------------------------------------------------
-// 5. Multi-selector items (state.items[].selectors) — a bundled question ("First & Last Name") is
+// 4. Multi-selector items (state.items[].selectors) — a bundled question ("First & Last Name") is
 //    only complete once EVERY required control is, not just whichever one the model listed first.
 // ---------------------------------------------------------------------------------------------------
-console.log('\n== 5. multi-selector item (first + last name) ==');
+console.log('\n== 4. multi-selector item (first + last name) ==');
 {
   const nameForm = (first: string, last: string) => frag(`
     <label for="first_name">First Name</label><input id="first_name" type="text" value="${first}" />
@@ -208,6 +155,196 @@ console.log('\n== 5. multi-selector item (first + last name) ==');
 
   check('empty selector list -> not complete (caller should use a manual item instead)',
     isItemComplete([], resolve(bothFilled)), false);
+}
+
+// ---------------------------------------------------------------------------------------------------
+// 5. A changed value has to be an answer too — not just different from where it started.
+// ---------------------------------------------------------------------------------------------------
+console.log('\n== 5. pre-filled fields: changed AND still an answer ==');
+{
+  const baselines = new Map([['#start', '2026-10-08'], ['#pri', 'mid']]);
+  const date = (value: string) => frag(`<input id="start" type="date" value="${value}" />`).querySelector('#start')!;
+  check('a pre-filled date left as-is -> incomplete', isElementComplete(date('2026-10-08'), '#start', baselines), false);
+  check('a pre-filled date CLEARED -> incomplete (a change, but not an answer)', isElementComplete(date(''), '#start', baselines), false);
+  check('a pre-filled date changed to another date -> complete', isElementComplete(date('2026-11-01'), '#start', baselines), true);
+  const blanked = frag('<select id="pri"><option value="" selected>Select…</option><option value="mid">Mid</option></select>').querySelector('#pri')!;
+  check('a defaulted <select> moved to its blank "Select…" option -> incomplete', isElementComplete(blanked, '#pri', baselines), false);
+  const wrappedSelect = frag('<div class="select-wrapper"><select id="pri"><option value="mid" selected>Mid</option></select></div>').querySelector('#pri')!;
+  check('an untouched default stays incomplete even inside a "select"-classed wrapper', isElementComplete(wrappedSelect, '#pri', baselines), false);
+}
+
+// ---------------------------------------------------------------------------------------------------
+// 5b. Leaving a default can be the answer: once the user has visited the field (focused it, then
+//     moved on), a real default left in place counts. An untouched default still doesn't.
+// ---------------------------------------------------------------------------------------------------
+console.log('\n== 5b. a visited field\'s kept default is an answer ==');
+{
+  const baselines = new Map([['#start', '2026-10-08'], ['#pri', 'mid'], ['#size', '']]);
+  const visitedOnly = (element: Element) => ({ has: (e: Element) => e === element });
+  const date = frag('<input id="start" type="date" value="2026-10-08" />').querySelector('#start')!;
+  check('a pre-filled date the user visited and left as-is -> complete',
+    isElementComplete(date, '#start', baselines, undefined, visitedOnly(date)), true);
+  check('  the same date never visited -> incomplete', isElementComplete(date, '#start', baselines), false);
+  const pri = frag('<select id="pri"><option value="low">Low</option><option value="mid" selected>Mid</option></select>').querySelector('#pri')!;
+  check('a defaulted <select> the user visited and kept -> complete',
+    isElementComplete(pri, '#pri', baselines, undefined, visitedOnly(pri)), true);
+  const placeholder = frag('<select id="size"><option value="" selected>Select…</option><option value="m">M</option></select>').querySelector('#size')!;
+  check('a visited <select> left on its blank "Select…" placeholder -> incomplete (not an answer)',
+    isElementComplete(placeholder, '#size', baselines, undefined, visitedOnly(placeholder)), false);
+  const other = frag('<input id="start" type="date" value="2026-10-08" />').querySelector('#start')!;
+  check('visiting a DIFFERENT field doesn\'t confirm this one\'s default',
+    isElementComplete(other, '#start', baselines, undefined, visitedOnly(date)), false);
+}
+
+// ---------------------------------------------------------------------------------------------------
+// 6. A wrapper is decided by its OWN answer, and nothing unchosen ever reads as complete.
+// ---------------------------------------------------------------------------------------------------
+console.log('\n== 6. a wrapper\'s own answer decides; all-unchosen is never complete ==');
+{
+  const consent = (checked: string) => frag(`<div id="consent">
+    <input type="hidden" name="agree" value="0" />
+    <label><input type="checkbox" id="agree" name="agree" value="1" ${checked} /> I agree to the terms</label></div>`).querySelector('#consent')!;
+  check('Rails-style hidden "0" + an UNCHECKED checkbox -> incomplete', isElementComplete(consent(''), '#consent'), false);
+  check('  the same checkbox checked -> complete', isElementComplete(consent('checked'), '#consent'), true);
+
+  const email = frag(`<div id="email-q"><label for="email">Email</label><input id="email" type="email" value="" />
+    <input type="hidden" name="source" value="linkedin" /></div>`).querySelector('#email-q')!;
+  check('an empty answer field is not completed by a filled hidden input beside it', isElementComplete(email, '#email-q'), false);
+
+  const phone = (number: string) => frag(`<fieldset id="phone-q"><legend>Phone</legend>
+    <input type="hidden" name="phone_country" value="US" />
+    <input id="phone" type="tel" value="${number}" /></fieldset>`).querySelector('#phone-q')!;
+  check('an empty phone number is not completed by a filled country code beside it', isElementComplete(phone(''), '#phone-q'), false);
+  check('  the phone number entered -> complete', isElementComplete(phone('4155551234'), '#phone-q'), true);
+
+  const resume = frag(`<div id="resume-q" role="group"><div role="tablist">
+      <button role="tab" aria-selected="true">Upload</button><button role="tab" aria-selected="false">Paste</button></div>
+    <input id="resume" type="file" /></div>`).querySelector('#resume-q')!;
+  check('a selected TAB in a file question is not an answer (no file chosen) -> incomplete', isElementComplete(resume, '#resume-q'), false);
+
+  const toggle = (yes: string, no: string) => frag(`<div id="relocate" class="choice-group">
+    <button class="option ${yes}">Yes</button><button class="option ${no}">No</button></div>`).querySelector('#relocate')!;
+  check('options classed "unselected" / "is-unchecked" -> incomplete', isElementComplete(toggle('unselected', 'is-unchecked'), '#relocate'), false);
+  check('options classed "not-selected" / "isNotSelected" -> incomplete', isElementComplete(toggle('not-selected', 'isNotSelected'), '#relocate'), false);
+  check('  one option classed "is-selected" -> complete', isElementComplete(toggle('is-selected', 'unselected'), '#relocate'), true);
+
+  const remote = (state: string) => frag(`<div id="remote" role="checkbox" aria-checked="${state}">Open to remote work</div>`).querySelector('#remote')!;
+  check('a custom checkbox clicked on and off again (still aria-checked=false) -> incomplete',
+    isElementComplete(remote('false'), '#remote', undefined, new Set(['#remote'])), false);
+  check('  the same checkbox left checked -> complete', isElementComplete(remote('true'), '#remote', undefined, new Set(['#remote'])), true);
+  const pressed = frag('<button id="ft" aria-pressed="false">Full-time only</button>').querySelector('#ft')!;
+  check('a toggle button pressed and released (aria-pressed=false) -> incomplete',
+    isElementComplete(pressed, '#ft', undefined, new Set(['#ft'])), false);
+  const autofill = frag('<button id="autofill">Autofill with resume</button>').querySelector('#autofill')!;
+  check('  while a plain button still counts once clicked', isElementComplete(autofill, '#autofill', undefined, new Set(['#autofill'])), true);
+
+  const twoConsents = frag(`<div role="group">
+    <label><input type="checkbox" id="terms" name="terms" /> I accept the terms</label>
+    <label><input type="checkbox" id="news" name="newsletter" checked /> Send me news</label></div>`);
+  check('an unchecked checkbox is not completed by a DIFFERENT checkbox next to it',
+    isElementComplete(twoConsents.querySelector('#terms')!, '#terms'), false);
+
+  const listboxDropdown = frag(`<div id="size" class="custom-dropdown"><span class="dd-display">Select…</span>
+    <ul role="listbox" hidden><li role="option" aria-selected="true">Select…</li><li role="option">Small</li></ul></div>`).querySelector('#size')!;
+  check('a dropdown whose hidden list pre-selects its "Select…" option -> incomplete', isElementComplete(listboxDropdown, '#size'), false);
+
+  const typing = frag(hispanicControl('<div class="select__placeholder">Select...</div>', '')
+    .replace('value=""', 'value="Not His"')).querySelector('#hispanic_ethnicity')!;
+  check('filter text typed into a react-select (nothing chosen yet) -> incomplete', isElementComplete(typing, '#hispanic_ethnicity'), false);
+  const city = frag('<label for="city">City</label><input id="city" type="text" role="combobox" aria-autocomplete="list" value="Seattle" />').querySelector('#city')!;
+  check('  while a free-text autocomplete answers by its own text', isElementComplete(city, '#city'), true);
+}
+
+// ---------------------------------------------------------------------------------------------------
+// 7. The behaviors that must keep working.
+// ---------------------------------------------------------------------------------------------------
+console.log('\n== 7. kept: what DOES answer a question ==');
+{
+  const text = (value: string) => frag(`<input id="t" type="text" value="${value}" />`).querySelector('#t')!;
+  check('entering non-empty text -> complete', isElementComplete(text('Ada'), '#t'), true);
+  check('leaving a text field with just spaces -> incomplete', isElementComplete(text('   '), '#t'), false);
+  const area = (value: string) => frag(`<textarea id="why">${value}</textarea>`).querySelector('#why')!;
+  check('a textarea with just whitespace -> incomplete', isElementComplete(area('  \n  '), '#why'), false);
+
+  const box = (checked: string) => frag(`<input id="c" type="checkbox" ${checked} />`).querySelector('#c')!;
+  check('checking a checkbox -> complete', isElementComplete(box('checked'), '#c'), true);
+  check('an unchecked checkbox -> incomplete', isElementComplete(box(''), '#c'), false);
+  const skills = frag(`<fieldset><legend>Languages</legend>
+    <label><input type="checkbox" id="py" name="skills[]" value="py" /> Python</label>
+    <label><input type="checkbox" id="go" name="skills[]" value="go" checked /> Go</label></fieldset>`);
+  check('a "select all that apply" group (shared name) is answered by any one checked', isElementComplete(skills.querySelector('#py')!, '#py'), true);
+
+  const unnamed = frag(`<fieldset id="shift"><legend>Preferred shift</legend>
+    <label><input type="radio" id="day" /> Day</label><label><input type="radio" id="night" checked /> Night</label></fieldset>`);
+  check('answering an ordinary radio group (unnamed radios in a fieldset) -> complete', isElementComplete(unnamed.querySelector('#day')!, '#day'), true);
+  const noneChosen = frag(`<fieldset><input type="radio" id="a1" name="q" /><input type="radio" id="a2" name="q" /></fieldset>`);
+  check('a radio group with nothing chosen -> incomplete', isElementComplete(noneChosen.querySelector('#a1')!, '#a1'), false);
+
+  const file = frag('<input id="cv" type="file" />').querySelector('#cv')!;
+  check('a file input with no file -> incomplete', isElementComplete(file, '#cv'), false);
+  Object.defineProperty(file, 'files', { value: { length: 1 } });
+  check('choosing a file -> complete', isElementComplete(file, '#cv'), true);
+
+  const select = (options: string) => frag(`<select id="s">${options}</select>`).querySelector('#s')!;
+  check('choosing a non-empty dropdown option -> complete', isElementComplete(select('<option value="">Select…</option><option value="ca" selected>Canada</option>'), '#s'), true);
+  check('a dropdown on its blank option -> incomplete', isElementComplete(select('<option value="" selected>Select…</option><option value="ca">Canada</option>'), '#s'), false);
+  check('a dropdown on a DISABLED placeholder option -> incomplete', isElementComplete(select('<option disabled selected>Choose one</option><option>Canada</option>'), '#s'), false);
+  check('a dropdown option "None" (no value attribute) is a real answer -> complete', isElementComplete(select('<option value="">Select…</option><option selected>None</option>'), '#s'), true);
+
+  const custom = (attrs: string) => frag(`<div role="radiogroup" id="g"><div role="radio" id="o1" ${attrs}>Yes</div><div role="radio" id="o2">No</div></div>`).querySelector('#o1')!;
+  check('custom state aria-checked="true" -> complete', isElementComplete(custom('aria-checked="true"'), '#o1'), true);
+  check('custom state data-state="checked" -> complete', isElementComplete(custom('data-state="checked"'), '#o1'), true);
+  check('custom state data-active="true" (Mantine segmented control) -> complete', isElementComplete(custom('data-active="true"'), '#o1'), true);
+  check('custom chosen class "_selected_wp0mv_44" -> complete', isElementComplete(custom('class="_option_x _selected_wp0mv_44"'), '#o1'), true);
+  check('custom chosen class "optionSelected" -> complete', isElementComplete(custom('class="optionSelected"'), '#o1'), true);
+  check('custom chosen class "Mui-checked" -> complete', isElementComplete(custom('class="MuiRadio-root Mui-checked"'), '#o1'), true);
+  check('no custom state at all -> incomplete', isElementComplete(custom('aria-checked="false"'), '#o1'), false);
+}
+
+// ---------------------------------------------------------------------------------------------------
+// 8. Answers that look like placeholders: "None" / "N/A" are real choices.
+// ---------------------------------------------------------------------------------------------------
+console.log('\n== 8. "None" and "N/A" are answers, not placeholders ==');
+{
+  const ashbyCombo = (display: string) => frag(`<div class="ashby-application-form-field-entry"><label>Disability status</label>
+    <div class="_wrapper_1v5zz_28"><div id="dis" class="_select_1v5zz_36" role="combobox" aria-haspopup="listbox">${display}</div></div></div>`).querySelector('#dis')!;
+  check('a chosen value "None" -> complete', isElementComplete(ashbyCombo('<div class="_value_1v5zz_58">None</div>'), '#dis'), true);
+  check('a chosen value "N/A" -> complete', isElementComplete(ashbyCombo('<div class="_value_1v5zz_58">N/A</div>'), '#dis'), true);
+  check('a chosen value "No" -> complete', isElementComplete(ashbyCombo('<div class="_value_1v5zz_58">No</div>'), '#dis'), true);
+  check('"None selected" placeholder text -> incomplete', isElementComplete(ashbyCombo('<div class="_display_x">None selected</div>'), '#dis'), false);
+  check('"Select..." placeholder text -> incomplete', isElementComplete(ashbyCombo('<div class="_display_x">Select...</div>'), '#dis'), false);
+  check('a rendered placeholder element -> incomplete, whatever its text says', isElementComplete(ashbyCombo('<div class="_placeholder_1v5zz_50">None</div>'), '#dis'), false);
+}
+
+// ---------------------------------------------------------------------------------------------------
+// 9. A field's default is its value when it FIRST appeared — not whatever it holds when a widget is
+//    (re)applied. Greenhouse's "Start date year" is an <input type="number">: answering a question
+//    that reveals another field regenerates the widget, and re-reading baselines then took the year
+//    the user already typed as its "default", flipping "Start date" back to incomplete.
+// ---------------------------------------------------------------------------------------------------
+console.log('\n== 9. first-seen values, not apply-time values, are the baseline ==');
+{
+  const body = frag(`<label for="start-year">Start date year</label><input id="start-year" type="number" value="" />
+    <label for="country">Country</label><select id="country"><option value="us" selected>United States</option><option value="ca">Canada</option></select>`);
+  const year = body.querySelector('#start-year')!;
+  const country = body.querySelector('#country')!;
+  const initial = new WeakMap<Element, string>();
+  recordInitialValues(body, initial);                       // page load: nothing typed yet
+  check('the empty year and the defaulted country are recorded as found', [initial.get(year), initial.get(country)].join('|'), '|us');
+
+  year.setAttribute('value', '2020');                       // the user types the year
+  recordInitialValues(body, initial);                       // the widget is regenerated and re-applied
+  check('recording again never overwrites a first-seen value', initial.get(year), '');
+  check('a typed year counts against its first-seen baseline -> complete',
+    isElementComplete(year, '#start-year', new Map([['#start-year', initial.get(year)!]])), true);
+  check('  (re-reading the baseline at apply time is what broke it -> incomplete)',
+    isElementComplete(year, '#start-year', new Map([['#start-year', '2020']])), false);
+  check('an untouched defaulted <select> is still not an answer',
+    isElementComplete(country, '#country', new Map([['#country', initial.get(country)!]])), false);
+
+  const revealed = frag('<div class="field"><input id="end-year" type="number" value="" /></div>').querySelector('.field')!;
+  recordInitialValues(revealed, initial);                   // a field revealed later, as it appears
+  check('a field that appears later is recorded when it appears', initial.has(revealed.querySelector('#end-year')!), true);
 }
 
 console.log(`\n== RESULT ==\n  ${pass} passed, ${fail} failed`);

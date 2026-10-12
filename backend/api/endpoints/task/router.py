@@ -1,13 +1,16 @@
 """Task representation — a task-aware semantic model of ONE specific webpage, grounded strictly in its
 real, visible elements.
 
-Two tiers (flat lists, parent references — never opaque nesting):
-- tasks       : coarse, goal-oriented activities the user could name; hierarchical via parent_task_id
-- components  : semantic groupings of DOM nodes a user refers to as one thing. Every individual form
-                question is its own component — this is what per-field completion tracking targets.
+Flat lists, linked by id (never opaque nesting):
+- tasks         : coarse, goal-oriented activities the user could name; hierarchical via parent_task_id
+- components    : semantic groupings of DOM nodes a user refers to as one thing, each with a closed
+                  component_type. Every individual form question is its own component — this is what
+                  per-field completion tracking targets.
+- relationships : depends_on / precedes / alternative_to links between components, only with visible
+                  evidence on the page
 
 Live completion/state is read from the DOM by the content script — the model never asserts it, so
-there are deliberately no status/relationship fields here.
+there are deliberately no status fields here.
 """
 from __future__ import annotations
 from typing import Any
@@ -20,13 +23,19 @@ from api.state.task import task_store, replace_task_store
 from definitions.task import (
     TASK_REPRESENTATION_GUIDE,
     PATCH_TASK_REPRESENTATION_GUIDE,
+    PAGE_TEXT_LIMIT,
+    PageElement,
     TaskRepresentationRequest,
     TaskPatchRequest,
     TaskRepresentationOut,
+    PatchOut,
+    Relationship,
+    valid_relationships,
     TASK_REPRESENTATION_TOOL,
     PATCH_COMPONENTS_TOOL,
 )
 from api.utils.llm import get_client_and_model, get_fast_client_and_model, call_structured_tool
+from api.endpoints.webpage_interface.router import components_to_items
 
 router = APIRouter()
 
@@ -52,6 +61,7 @@ async def model_task_representation(request: TaskRepresentationRequest) -> dict[
             "url": request.url,
             "title": request.title,
             "elements": [element.model_dump() for element in elements],
+            "containers": [container.model_dump() for container in request.containers],
         }
         return await call_structured_tool(
             client=client,
@@ -68,6 +78,17 @@ async def model_task_representation(request: TaskRepresentationRequest) -> dict[
         return None
 
 
+def _fallback_component_type(element: PageElement) -> str:
+    """A best guess at a control's component_type from its tag and role, for the model-free fallbacks."""
+    if element.tag == "textarea":
+        return "long-text-question"
+    if element.tag == "select" or element.role in {"combobox", "listbox", "radio", "radiogroup"}:
+        return "single-choice-question"
+    if element.role in {"checkbox", "switch"}:
+        return "toggle-question"
+    return "text-question"
+
+
 def fallback_task_representation(request: TaskRepresentationRequest) -> dict[str, Any]:
     """Model-free fallback: one form-completion task plus one component per real form control, so a
     transient model failure still yields a per-field-granular model grounded in the real page."""
@@ -78,6 +99,7 @@ def fallback_task_representation(request: TaskRepresentationRequest) -> dict[str
     components = [
         {
             "component_id": f"c{i + 1}",
+            "component_type": _fallback_component_type(e),
             "semantic_role": "field-group",
             "label": (e.accessibleName or e.text or e.tag).strip()[:80],
             "description": "",
@@ -102,6 +124,7 @@ def fallback_task_representation(request: TaskRepresentationRequest) -> dict[str
             "importance": "primary",
         }] if components else [],
         "components": components,
+        "relationships": [],
         "modeling_notes": "Deterministic fallback — no model call.",
     }
 
@@ -118,7 +141,7 @@ def get_task_representation(site_id: str) -> dict[str, Any]:
 @router.post("/task-representations/{site_id}/analyze")
 async def analyze_task_representation(site_id: str, request: TaskRepresentationRequest) -> dict[str, Any]:
     task_representation = await model_task_representation(request) or fallback_task_representation(request)
-    replace_task_store(site_id, task_representation, request.page_text[:12000])
+    replace_task_store(site_id, task_representation, request.page_text[:PAGE_TEXT_LIMIT])
     return task_representation
 
 
@@ -148,6 +171,8 @@ def _remove_components(rep: dict[str, Any], selectors: list[str]) -> int:
     rep["components"] = kept
     for task in rep.get("tasks", []):
         task["component_ids"] = [cid for cid in task.get("component_ids", []) if cid not in dropped_ids]
+    rep["relationships"] = [rel for rel in rep.get("relationships", [])
+                            if rel.get("source") not in dropped_ids and rel.get("target") not in dropped_ids]
     return len(dropped_ids)
 
 
@@ -179,6 +204,7 @@ def _fallback_patch_components(rep: dict[str, Any], added) -> list[dict[str, Any
     start = _next_component_id(rep)
     return [{
         "component_id": f"c{start + i}",
+        "component_type": _fallback_component_type(e),
         "semantic_role": "field-group",
         "label": (e.accessibleName or e.text or e.tag).strip()[:80],
         "description": "",
@@ -190,35 +216,65 @@ def _fallback_patch_components(rep: dict[str, Any], added) -> list[dict[str, Any
     } for i, e in enumerate(controls[:10])]
 
 
-async def _model_patch_components(rep: dict[str, Any], added) -> list[dict[str, Any]] | None:
+def _mapped_selectors(rep: dict[str, Any]) -> set[str]:
+    return {s for comp in rep.get("components", [])
+            for s in (comp.get("dom_selector"), *comp.get("member_selectors", [])) if isinstance(s, str)}
+
+
+def _unmapped_revealed(rep: dict[str, Any], revealed: list[list[PageElement]]) -> list[PageElement]:
+    """A question that was in the DOM but hidden at analyze time may already be modelled — its coming
+    into view is an availability change, not a new component. Only questions with no control mapped at
+    all are added (all of a radio group's options together, so one unmapped option of an otherwise
+    mapped group can't become a lone component)."""
+    mapped = _mapped_selectors(rep)
+    return [e for group in revealed if not any(e.selector in mapped for e in group) for e in group]
+
+
+async def _model_patch_components(rep: dict[str, Any], added, containers) -> tuple[list[dict[str, Any]], list[dict[str, Any]]] | None:
     # ANTHROPIC_MODEL_FAST (falls back to ANTHROPIC_MODEL if unset) — used HERE ONLY, i.e. only when
     # /patch is called, which only happens for a genuine structural DOM change while a widget is
     # showing (see App.tsx processStructuralChange). The full /analyze always uses get_client_and_model().
+    # Low thinking on Gemini: on a real Greenhouse form it added a revealed question correctly 3 of 3
+    # times at every level, in ~2.6s vs. ~11s at medium.
     client, model = get_fast_client_and_model()
     if client is None:
         return None
     try:
         print(f"patch [{model}]: {len(added)} added element(s), {len(rep.get('components', []))} existing component(s)")
-        existing = [{"semantic_role": c.get("semantic_role"), "label": c.get("label"),
-                     "dom_selector": c.get("dom_selector")} for c in rep.get("components", [])]
+        existing = [{"component_id": c.get("component_id"), "component_type": c.get("component_type"),
+                     "label": c.get("label"), "dom_selector": c.get("dom_selector")} for c in rep.get("components", [])]
         user = (
             "EXISTING components (summary — do not repeat these):\n"
             f"{json.dumps(existing)}\n\n"
             "NEW elements that just appeared:\n"
             f"{json.dumps([e.model_dump() for e in added])}\n\n"
-            "Return only the new component(s) via add_components."
+            + (f"CONTAINERS those elements sit in (each element's `container` is one of these `selector`s):\n"
+               f"{json.dumps([c.model_dump() for c in containers])}\n\n" if containers else "")
+            + "Return only the new component(s), and any relationships from them, via add_components."
         )
-        out = await call_structured_tool(
+        out: PatchOut | None = await call_structured_tool(
             client=client, model=model, system=PATCH_TASK_REPRESENTATION_GUIDE,
             messages=[{"role": "user", "content": user}],
             tool=PATCH_COMPONENTS_TOOL, max_tokens=4000,
-            validate=lambda d: d, label="task representation patch",
+            validate=PatchOut.model_validate, label="task representation patch",
+            thinking_level="low",
         )
-        comps = (out or {}).get("components") or []
+        if out is None:
+            return None
+        comps = [comp.model_dump() for comp in out.components]
+        # Re-id to avoid collisions with existing components, and point the new links at the new ids.
         start = _next_component_id(rep)
-        for i, comp in enumerate(comps):        # re-id to avoid collisions with existing components
-            comp["component_id"] = f"c{start + i}"
-        return comps
+        new_ids = {}
+        for i, comp in enumerate(comps):
+            new_ids[comp["component_id"]] = f"c{start + i}"
+            comp["component_id"] = new_ids[comp["component_id"]]
+        existing_ids = {c.get("component_id") for c in rep.get("components", [])}
+        links = [Relationship(type=rel.type,
+                              source=new_ids.get(rel.source, rel.source if rel.source in existing_ids else ""),
+                              target=new_ids.get(rel.target, rel.target if rel.target in existing_ids else ""))
+                 for rel in out.relationships]
+        known = existing_ids | set(new_ids.values())
+        return comps, [rel.model_dump() for rel in valid_relationships(links, known)]
     except Exception as error:
         print(f"task representation patch call failed; using fallback: {error}")
         return None
@@ -233,10 +289,15 @@ async def patch_task_representation(site_id: str, request: TaskPatchRequest) -> 
         raise HTTPException(status_code=404, detail="Analyze the page before patching it")
     rep = copy.deepcopy(task_store["task_representation"])
     removed_count = _remove_components(rep, request.removed)
+    added = request.added + _unmapped_revealed(rep, request.revealed)
     new_components: list[dict[str, Any]] = []
-    if request.added:
-        new_components = await _model_patch_components(rep, request.added) or _fallback_patch_components(rep, request.added)
+    new_relationships: list[dict[str, Any]] = []
+    if added:
+        patched = await _model_patch_components(rep, added, request.containers)
+        new_components, new_relationships = patched if patched is not None else (_fallback_patch_components(rep, added), [])
     _append_components(rep, new_components)
+    if new_relationships:
+        rep.setdefault("relationships", []).extend(new_relationships)
     replace_task_store(site_id, rep, task_store.get("page_text", ""))
     # `changed` = did the task representation actually gain/lose a component. A DOM change the client
     # flagged as structural often turns out to be cosmetic (a file-upload button row swapping for a
@@ -246,4 +307,7 @@ async def patch_task_representation(site_id: str, request: TaskPatchRequest) -> 
     changed = len(new_components) > 0 or removed_count > 0
     print(f"patch: +{len(new_components)} components, -{removed_count} selectors "
           f"({len(rep.get('components', []))} total); changed={changed}")
-    return {**rep, "changed": changed}
+    # `added_items`: the new components as widget items, so the panel can splice them into the widget
+    # already on the page (content.ts spliceWidgetItems) instead of regenerating it — ~70s at medium
+    # thinking for a page change that only added or removed a question.
+    return {**rep, "changed": changed, "added_items": components_to_items({"components": new_components})}
