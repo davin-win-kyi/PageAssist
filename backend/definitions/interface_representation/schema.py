@@ -45,6 +45,15 @@ TREE_SCHEMA = {
 
 
 class SaveInterfaceRepresentationRequest(BaseModel):
-    """Body of POST /interface-representations: the name for a new saved copy of the working tree."""
+    """Body of POST /interface-representations: the name for a new saved copy of the working tree, and
+    the interface showing when it was saved, which the study records file the save with."""
 
     name: str
+    record_id: str | None = None
+
+
+class UpdateInterfaceRepresentationRequest(BaseModel):
+    """Optional body of POST /interface-representations/{id}/update: the interface showing when the
+    saved entry was updated, which the study records file the update with."""
+
+    record_id: str | None = None

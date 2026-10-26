@@ -7,6 +7,10 @@ The following file runs PageAssist end to end on the three live pages used for t
   and checking items off by hand on the tutorial
 - a saved interface is transferred to the other pages, and on Kargo, answering the Hispanic/Latino
   question must add the race question to the interface that's showing
+- on Creatify, the Yes/No questions and the resume upload must tick off their items
+
+Note: once a page has loaded, nothing it would send is let out, since Ashby saves each answer and
+uploads a chosen file straight away. Nothing typed or chosen in a test leaves the machine.
 
 Note: it does the side panel's part itself, calling the same backend routes in the same order.
 It needs the extension built, a model in backend/.env, and network access. It never submits a form.
@@ -55,6 +59,14 @@ const SITES = {
     port: 8103,
     view: '#_systemfield_name',
     fills: [['#_systemfield_name', 'Test User'], ['#_systemfield_email', 'test.user@example.com']],
+    // questions answered with more than typing, each found by its label
+    answers: [
+      { question: /legally authorized to work/i, click: 'button[data-option="yes"]', how: 'answering Yes' },
+      { question: /require sponsorship/i, click: 'button[data-option="no"]', how: 'answering No' },
+      { question: /^resume$/i, upload: 'input[type="file"]', how: 'uploading a resume' },
+    ],
+    // a question left unanswered, whose item must stay as it is
+    unanswered: /salary expectation/i,
   },
 };
 const TRANSFER_PORT = 8104;
@@ -219,13 +231,14 @@ Opens a page in its own browser with the extension loaded, and keeps the page-ch
 content script posts to the page
 */
 async function openSite(key) {
-  const site = { key, ...SITES[key], console: [], results: { key, title: SITES[key].title, kind: SITES[key].kind, url: SITES[key].url, interfaces: [] } };
+  const site = { key, ...SITES[key], console: [], blocked: [], results: { key, title: SITES[key].title, kind: SITES[key].kind, url: SITES[key].url, interfaces: [] } };
   site.context = await chromium.launchPersistentContext(fs.mkdtempSync(path.join(os.tmpdir(), 'pageassist-e2e-browser-')), {
     executablePath: chromePath(),
     headless: true,
     viewport: { width: 1280, height: 800 },
     args: [`--disable-extensions-except=${EXTENSION}`, `--load-extension=${EXTENSION}`],
   });
+  const loaded = await keepAnswersHere(site);
   site.worker = site.context.serviceWorkers()[0] ?? await site.context.waitForEvent('serviceworker');
   site.page = site.context.pages()[0] ?? await site.context.newPage();
   site.page.on('console', (message) => { if (message.type() === 'error') site.console.push(message.text()); });
@@ -233,6 +246,7 @@ async function openSite(key) {
   await site.page.goto(site.url, { waitUntil: 'load', timeout: 90_000 }).catch(() => {});
   await site.page.waitForFunction(() => document.documentElement.dataset.pageassistPlugin === 'connected', null, { timeout: 30_000 });
   await wait(3000);
+  loaded();
   site.results.loadMs = Date.now() - started;
   await site.page.evaluate(() => {
     // the content script's lookup: the page first, then shadow roots and same-origin iframes
@@ -261,6 +275,28 @@ async function openSite(key) {
     return chrome.tabs.sendMessage(tab.id, m);
   }, message);
   return site;
+}
+
+/*
+Lets a page send what it needs to load, then drops every request that would send data, like Ashby
+saving each answer or uploading a chosen file. Returns the call that marks the page as loaded.
+*/
+async function keepAnswersHere(site) {
+  const loadCalls = new Set();
+  let loaded = false;
+  await site.context.route('**/*', (route) => {
+    const request = route.request();
+    if (['GET', 'HEAD', 'OPTIONS'].includes(request.method())) return route.continue();
+    const url = new URL(request.url());
+    if (['127.0.0.1', 'localhost'].includes(url.hostname)) return route.continue();
+    // a GraphQL page sends every call to one address, told apart by its operation
+    const call = `${url.host}${url.pathname}?op=${url.searchParams.get('op') ?? ''}`;
+    if (!loaded) loadCalls.add(call);
+    if (!loaded || loadCalls.has(call)) return route.continue();
+    site.blocked.push(`${request.method()} ${call}`);
+    return route.abort();
+  });
+  return () => { loaded = true; };
 }
 
 /*
@@ -468,12 +504,17 @@ async function showInWidget(site, pattern) {
   await wait(300);
 }
 
-// Files a PNG of just the widget with its interface in the records, as the side panel does
+// Files a PNG of just the widget with its interface in the records, as the side panel does. Each
+// one is also the widget's final screenshot until it changes again.
 async function fileScreenshot(site, port, recordId, reason) {
   if (!recordId) return;
   await settleFrame(site);
   const png = await site.page.locator('iframe[data-pageassist-interface]').screenshot({ type: 'png' }).catch(() => null);
-  if (png) await api(port, 'POST', '/records/screenshots', { record_id: recordId, reason, image: `data:image/png;base64,${png.toString('base64')}` }).catch(() => {});
+  if (!png) return;
+  const image = `data:image/png;base64,${png.toString('base64')}`;
+  for (const as of reason === 'final' ? ['final'] : [reason, 'final']) {
+    await api(port, 'POST', '/records/screenshots', { record_id: recordId, reason: as, image }).catch(() => {});
+  }
 }
 
 // The rest of what the side panel files in the records
@@ -577,6 +618,9 @@ async function testInterface(site, port, siteId, key, startOver) {
     check(`${site.key} ${key}: the widget draws on the page without errors`, applied.ok, applied.error);
     result.shots = { page: await shoot(site, key), widget: await shoot(site, `${key}-widget`, { widgetOnly: true }) };
     await fileScreenshot(site, port, widget.record_id, 'applied');
+    // saved from the chat's offer, as a user would, with a screenshot of what was saved
+    result.saved = await api(port, 'POST', '/interface-representations', { name: `${spec.title} on ${site.key}`, record_id: widget.record_id });
+    await fileScreenshot(site, port, widget.record_id, 'saved');
 
     if (site.kind === 'form') {
       const before = await widgetText(site);
@@ -660,6 +704,65 @@ async function testActiveChange(site, port, siteId, checklist) {
   return result;
 }
 
+/*
+Creatify: Yes/No questions answered with toggle buttons (where "No" leaves the hidden checkbox under
+them unchecked) and the resume upload must tick off their items, and the resume must stay ticked off
+once the page empties its file input after taking the file
+*/
+async function testOtherAnswers(site, port, checklist) {
+  log(`\n== ${site.key}: Yes/No buttons and the resume upload ==`);
+  const result = { questions: [] };
+  await applyWidget(site, checklist);
+  const entryOf = (answer) => site.page.locator('.ashby-application-form-field-entry')
+    .filter({ has: site.page.locator('label', { hasText: answer.question }) }).first();
+  // the checklist's items for a question: those tracking something inside the question's field
+  const itemsFor = async (answer, items) => {
+    const inside = await entryOf(answer).evaluate((entry, lists) => lists.map((selectors) => selectors.some((selector) => {
+      const el = window.__paFind(selector);
+      return !!el && entry.contains(el);
+    })), items.map(itemSelectors)).catch(() => items.map(() => false));
+    return items.filter((_, i) => inside[i]);
+  };
+  const before = checklist.state?.items ?? [];
+  for (const answer of site.answers) {
+    const tracked = await itemsFor(answer, before);
+    check(`${site.key}: the checklist has an item for "${answer.question.source}"`, tracked.length > 0);
+    result.questions.push({ question: answer.question.source, how: answer.how, items: tracked.map((item) => ({ label: item.label, selectors: itemSelectors(item) })) });
+  }
+
+  await entryOf(site.answers[0]).scrollIntoViewIfNeeded();
+  for (const answer of site.answers) {
+    const entry = entryOf(answer);
+    if (answer.click) await entry.locator(answer.click).click();
+    if (answer.upload) await entry.locator(answer.upload).setInputFiles({ name: 'Test User Resume.pdf', mimeType: 'application/pdf', buffer: Buffer.from('%PDF-1.4\n% PageAssist test\n') });
+    await wait(700);
+  }
+  await wait(2500);
+  const after = (await lastState(site))?.items ?? [];
+  for (const [i, answer] of site.answers.entries()) {
+    const tracked = await itemsFor(answer, after);
+    result.questions[i].complete = tracked.map((item) => item.complete === true);
+    check(`${site.key}: ${answer.how} ticks off its item`, tracked.length > 0 && tracked.every((item) => item.complete === true), JSON.stringify(result.questions[i]));
+  }
+  if (site.unanswered) {
+    const untouched = await itemsFor({ question: site.unanswered }, after);
+    check(`${site.key}: an unanswered question's item stays unticked`, untouched.length > 0 && untouched.every((item) => item.complete !== true), JSON.stringify(untouched));
+  }
+  result.shots = { widget: await shoot(site, 'answers-widget', { widgetOnly: true }) };
+  await fileScreenshot(site, port, checklist.record_id, 'final');
+
+  // the page may empty its file input once it has taken the file: the area still shows the file
+  const upload = site.answers.find((answer) => answer.upload);
+  if (upload) {
+    await entryOf(upload).locator(upload.upload).evaluate((input) => { input.value = ''; });
+    await wait(2600);
+    const tracked = await itemsFor(upload, (await lastState(site))?.items ?? after);
+    check(`${site.key}: the resume stays ticked off once the page empties its file input`, tracked.length > 0 && tracked.every((item) => item.complete === true));
+  }
+  result.blocked = [...new Set(site.blocked)];
+  return result;
+}
+
 async function testSite(site) {
   log(`\n######## ${site.title} ########`);
   const port = site.port;
@@ -676,10 +779,9 @@ async function testSite(site) {
   }
   await site.page.evaluate(() => window.__paEvents.splice(0));
   for (const key of INTERFACE_KEYS) site.results.interfaces.push(await testInterface(site, port, analysis.siteId, key, site.results.interfaces.length > 0));
-  if (site.key === 'kargo') {
-    const checklist = site.results.interfaces.find((i) => i.key === 'checklist')?.widget;
-    if (checklist) site.results.activeChange = await testActiveChange(site, port, analysis.siteId, checklist);
-  }
+  const checklist = site.results.interfaces.find((i) => i.key === 'checklist')?.widget;
+  if (site.key === 'kargo' && checklist) site.results.activeChange = await testActiveChange(site, port, analysis.siteId, checklist);
+  if (site.answers && checklist) site.results.otherAnswers = await testOtherAnswers(site, port, checklist);
   site.results.consoleErrors = site.console.filter((text) => /PageAssist/.test(text));
 }
 
@@ -754,6 +856,15 @@ function checkRecords(site) {
     interfaces.length >= built && interfaces.every((dir) => builtFrom.every((name) => fs.existsSync(path.join(dir, name))))
       && interfaces.filter((dir) => fs.readdirSync(dir).some((name) => name.startsWith('screenshot-'))).length >= built,
     `${interfaces.length} recorded, ${built} built`);
+  check(`${site.key}: every interface has its final screenshot, and every saved one a screenshot of what was saved`,
+    interfaces.every((dir) => fs.readdirSync(dir).some((name) => name.startsWith('screenshot-final.')))
+      && interfaces.filter((dir) => (JSON.parse(read(path.join(dir, 'meta.json'))).saved ?? []).length > 0)
+        .every((dir) => fs.readdirSync(dir).some((name) => name.startsWith('screenshot-saved'))),
+    interfaces.map((dir) => `${path.basename(dir)}: ${fs.readdirSync(dir).filter((name) => name.startsWith('screenshot')).join(' ')}`).join('; '));
+  const savedNames = site.results.interfaces.filter((i) => i.saved).map((i) => i.saved.name);
+  const filedSaves = interfaces.flatMap((dir) => (JSON.parse(read(path.join(dir, 'meta.json'))).saved ?? []).map((save) => save.name));
+  check(`${site.key}: every interface saved is filed with the interface that was showing`,
+    savedNames.every((name) => filedSaves.includes(name)), `${savedNames.join(', ')} saved; ${filedSaves.join(', ')} filed`);
   check(`${site.key}: each interface records the iterations that led to it`,
     interfaces.every((dir) => typeof JSON.parse(read(path.join(dir, 'meta.json'))).iterations?.chat_turns === 'number'));
   check(`${site.key}: the task representations and interface representation versions are in the records`, tasks >= 1 && versions >= built, `${tasks} task, ${versions} interface`);

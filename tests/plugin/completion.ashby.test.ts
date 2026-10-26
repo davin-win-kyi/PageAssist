@@ -3,6 +3,8 @@
 // below is Ashby's stable structure: an `ashby-application-form-field-entry` wrapper per field, a
 // custom `_select_`-hashed combobox with `_placeholder_` / `_value_` display divs, and a
 // `[role="radiogroup"]` of `[role="radio"][aria-checked]` options for Yes/No questions.
+// Sections 5 and 6 are markup taken from the live Creatify application (jobs.ashbyhq.com/creatify),
+// before and after answering: Yes/No toggle buttons over a hidden checkbox, and the resume upload.
 //   node tests/plugin/completion.ashby.test.ts
 import { parseHTML } from 'linkedom';
 
@@ -11,7 +13,7 @@ for (const k of ['window', 'document', 'Element', 'Node', 'HTMLElement', 'HTMLIn
   (globalThis as Record<string, unknown>)[k] = (dom as unknown as Record<string, unknown>)[k];
 }
 
-const { isElementComplete } = await import('../../plugin/lib/completion.ts');
+const { isElementComplete, isItemComplete } = await import('../../plugin/lib/completion.ts');
 
 let pass = 0;
 let fail = 0;
@@ -112,6 +114,90 @@ console.log('\n== 4. Yes/No radiogroup ==');
   const onGroup = group('false', 'true', '.ashby-application-form-field-entry [role="radiogroup"]');
   check('grounded on the radiogroup wrapper, "No" chosen -> complete',
     isElementComplete(onGroup.body.querySelector(onGroup.sel)!, onGroup.sel), true);
+}
+
+// ---------------------------------------------------------------------------------------------------
+// 5. Creatify's Yes/No questions: toggle buttons (aria-pressed) over a hidden checkbox that is checked
+//    for "Yes" and stays unchecked for "No". The label's `for` names the checkbox's `name`, not an id.
+// ---------------------------------------------------------------------------------------------------
+console.log('\n== 5. Yes/No toggle buttons over a hidden checkbox (Creatify) ==');
+{
+  const yesNo = (path: string, question: string, chosen: '' | 'yes' | 'no') => `
+    <div class="_fieldEntry_1e3gg_28 ashby-application-form-field-entry" data-field-path="${path}">
+      <label class="_heading_f7cvd_52 _required_f7cvd_91 _label_1e3gg_42 ashby-application-form-question-title" for="${path}">${question}</label>
+      <div class="_container_1svni_28 _yesno_1e3gg_148  ashby-application-form-input-yesno">
+        <button class="_container_pjyt6_1 _option_1svni_32 ${chosen === 'yes' ? '_active_1svni_57' : ''} ashby-application-form-input-yesno-option" aria-pressed="${chosen === 'yes'}" data-option="yes" data-tw-ref="${path}-yes">Yes</button>
+        <button class="_container_pjyt6_1 _option_1svni_32 ${chosen === 'no' ? '_active_1svni_57' : ''} ashby-application-form-input-yesno-option" aria-pressed="${chosen === 'no'}" data-option="no" data-tw-ref="${path}-no">No</button>
+        <input type="checkbox" class="_input_1svni_78" tabindex="-1" name="${path}"${chosen === 'yes' ? ' checked' : ''}>
+      </div>
+    </div>`;
+  const form = (authorized: '' | 'yes' | 'no', sponsorship: '' | 'yes' | 'no') => frag(`<div class="_section_1e3gg_1">
+    ${yesNo('8b35931a-1d48-4210-b2d9-1d1b99f490d5', 'Are you legally authorized to work in the United States?', authorized)}
+    ${yesNo('b9428a01-aa56-4700-8b71-e83f262c999c', 'Do you now or in the future require sponsorship from the company?', sponsorship)}
+  </div>`);
+  const label = 'label[for="8b35931a-1d48-4210-b2d9-1d1b99f490d5"]';
+  const judge = (body: Element, selector: string) => isElementComplete(body.querySelector(selector)!, selector);
+  check('grounded on the question\'s label, nothing chosen -> incomplete', judge(form('', ''), label), false);
+  check('grounded on the label, "Yes" chosen -> complete', judge(form('yes', ''), label), true);
+  check('grounded on the label, "No" chosen (checkbox stays unchecked) -> complete', judge(form('no', ''), label), true);
+  check('the other question\'s label stays incomplete', judge(form('no', ''), 'label[for="b9428a01-aa56-4700-8b71-e83f262c999c"]'), false);
+  check('grounded on the "Yes" button, "No" chosen -> complete (its group is answered)',
+    judge(form('no', ''), '[data-tw-ref="8b35931a-1d48-4210-b2d9-1d1b99f490d5-yes"]'), true);
+  check('grounded on the "No" button, nothing chosen -> incomplete',
+    judge(form('', ''), '[data-tw-ref="8b35931a-1d48-4210-b2d9-1d1b99f490d5-no"]'), false);
+  check('grounded on the hidden checkbox, "No" chosen -> complete',
+    judge(form('no', ''), 'input[name="8b35931a-1d48-4210-b2d9-1d1b99f490d5"]'), true);
+  check('grounded on the field entry, "No" chosen -> complete',
+    judge(form('no', ''), '[data-field-path="8b35931a-1d48-4210-b2d9-1d1b99f490d5"]'), true);
+  const bundle = [label, '[data-tw-ref="8b35931a-1d48-4210-b2d9-1d1b99f490d5-yes"]', '[data-tw-ref="8b35931a-1d48-4210-b2d9-1d1b99f490d5-no"]'];
+  const answered = form('no', '');
+  check('an item bundling the label and both buttons, "No" chosen -> complete',
+    isItemComplete(bundle, (selector) => answered.querySelector(selector)), true);
+  const unanswered = form('', '');
+  check('the same item, nothing chosen -> incomplete',
+    isItemComplete(bundle, (selector) => unanswered.querySelector(selector)), false);
+}
+
+// ---------------------------------------------------------------------------------------------------
+// 6. Creatify's resume upload: a visually hidden file input (tabindex -1) inside the upload area,
+//    which shows the file's name and a "Delete file" button once one is chosen. The input can be
+//    emptied once the page has taken the file, so the area is what shows the answer.
+// ---------------------------------------------------------------------------------------------------
+console.log('\n== 6. resume upload (Creatify) ==');
+{
+  const resume = (chosen: boolean, hint = '') => frag(`<div class="_section_1e3gg_1">
+    <div class="_fieldEntry_1e3gg_28 ashby-application-form-field-entry" data-field-path="_systemfield_resume">
+      <label class="_heading_f7cvd_52 _required_f7cvd_91 _label_1e3gg_42 ashby-application-form-question-title" for="_systemfield_resume">Resume</label>
+      <div role="presentation" class="_container_10xk4_70  ashby-application-form-input-file" data-tw-ref="tw-19">
+        <input accept="application/pdf,.pdf,.doc,.docx" type="file" tabindex="-1" id="_systemfield_resume" required="" style="position: absolute; width: 1px; height: 1px; overflow: hidden;">
+        ${chosen ? `<div class="_file_10xk4_76 ashby-application-form-input-file-item">
+          <p class="_name_10xk4_41 ashby-application-form-input-file-item-name"><svg></svg><span>Jane Doe Resume (2).pdf</span></p>
+          <button title="Delete file" class="_button_zyh3g_28 _quaternary_zyh3g_92 _negative_zyh3g_172 _removeButton_10xk4_83 ashby-application-form-input-file-item-delete"><svg></svg></button>
+        </div>` : ''}
+        <div class="_instructions_10xk4_33 ashby-application-form-input-file-dropzone">
+          <button class="_button_zyh3g_28 _secondary_zyh3g_115 _button_10xk4_106 ashby-application-form-input-file-dropzone-upload" data-tw-ref="tw-20"><span>${chosen ? 'Replace' : 'Upload File'}</span></button>
+          <p class="_dragInstructions_10xk4_28 ashby-application-form-input-file-dropzone-instructions">or drag and drop here</p>
+          ${hint}
+        </div>
+      </div>
+    </div>
+    <div class="_fieldEntry_1e3gg_28 ashby-application-form-field-entry">
+      <label for="_systemfield_email">Email</label><input id="_systemfield_email" type="email" value="">
+    </div>
+  </div>`);
+  const judge = (body: Element, selector: string) => isElementComplete(body.querySelector(selector)!, selector);
+  check('grounded on the upload area, nothing chosen -> incomplete', judge(resume(false), '[data-tw-ref="tw-19"]'), false);
+  check('grounded on the upload area, a file shown -> complete', judge(resume(true), '[data-tw-ref="tw-19"]'), true);
+  check('grounded on the hidden input, emptied after the upload -> complete (the area shows the file)',
+    judge(resume(true), '#_systemfield_resume'), true);
+  check('grounded on the label, a file shown -> complete', judge(resume(true), 'label[for="_systemfield_resume"]'), true);
+  check('grounded on the field entry, a file shown -> complete', judge(resume(true), '[data-field-path="_systemfield_resume"]'), true);
+  check('grounded on the hidden input, nothing chosen -> incomplete', judge(resume(false), '#_systemfield_resume'), false);
+  check('a list of accepted file types isn\'t a chosen file',
+    judge(resume(false, '<p>Accepted: .pdf, .docx, .txt (max 5.0 MB)</p>'), '#_systemfield_resume'), false);
+  check('nor is help text that mentions a file name',
+    judge(resume(false, '<p>e.g. JaneDoe_Resume.pdf</p><p>Please upload resume.pdf or resume.docx</p>'), '#_systemfield_resume'), false);
+  check('the next question isn\'t answered by the resume', judge(resume(true), '#_systemfield_email'), false);
 }
 
 console.log(`\n== RESULT ==\n  ${pass} passed, ${fail} failed`);

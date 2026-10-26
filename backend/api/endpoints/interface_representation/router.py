@@ -18,7 +18,7 @@ from api.state.interface_representation import (
     is_agreed,
     set_active_tree,
 )
-from definitions.interface_representation import SaveInterfaceRepresentationRequest
+from definitions.interface_representation import SaveInterfaceRepresentationRequest, UpdateInterfaceRepresentationRequest
 from api.utils import records
 
 router = APIRouter()
@@ -54,7 +54,7 @@ def save_interface_representation(request: SaveInterfaceRepresentationRequest) -
     entry = {"id": entry_id, "name": request.name, "tree": copy.deepcopy(get_active_tree())}
     interface_store["representations"][entry_id] = entry
     save_interface_store()
-    records.event("saved interface", {"id": entry_id, "name": request.name})
+    records.saved("saved interface", entry_id, request.name, request.record_id)
     return {"id": entry_id, "name": request.name}
 
 
@@ -71,14 +71,14 @@ def activate_interface_representation(entry_id: str) -> dict[str, Any]:
 
 
 @router.post("/interface-representations/{entry_id}/update")
-def update_interface_representation(entry_id: str) -> dict[str, Any]:
+def update_interface_representation(entry_id: str, request: UpdateInterfaceRepresentationRequest | None = None) -> dict[str, Any]:
     """Write the working tree back onto a saved entry, to keep the changes made to the one in use."""
     if entry_id not in interface_store["representations"]:
         raise HTTPException(status_code=404, detail="Interface representation not found")
     entry = interface_store["representations"][entry_id]
     entry["tree"] = copy.deepcopy(get_active_tree())
     save_interface_store()
-    records.event("updated saved interface", {"id": entry_id, "name": entry["name"]})
+    records.saved("updated saved interface", entry_id, entry["name"], request.record_id if request else None)
     return {"id": entry_id, "name": entry["name"]}
 
 

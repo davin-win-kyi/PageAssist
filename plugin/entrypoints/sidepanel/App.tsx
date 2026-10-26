@@ -133,24 +133,60 @@ function App() {
   // Sends a widget (or null) to the page and records which site it's on
   const pushWebpageInterface = (widget: Widget | null) => {
     widgetSiteIdRef.current = widget ? siteIdRef.current : ''
-    if (!widget) recordIdRef.current = null
+    if (!widget) {
+      recordIdRef.current = null
+      window.clearTimeout(finalShotTimerRef.current)
+    }
     pushToPage(widget)
   }
 
-  // A screenshot of just the widget for the study records, once it has settled on the page
-  const saveScreenshot = (recordId: string | null | undefined, reason: 'applied' | 'updated') => {
+  /*
+  Screenshots of just the widget for the study records. Each one is also the widget's final
+  screenshot, the way it was last seen, until it changes again.
+  */
+  const saveScreenshot = (recordId: string | null | undefined, reason: 'applied' | 'updated' | 'saved') => {
     if (!recordId) return
     window.setTimeout(() => {
       void captureInterface()
-        .then(image => { if (image) backend.recordScreenshot(recordId, reason, image) })
+        .then(image => {
+          if (!image) return
+          void backend.recordScreenshot(recordId, reason, image)
+          if (recordIdRef.current === recordId) void backend.recordScreenshot(recordId, 'final', image)
+        })
         .catch(error => console.warn('PageAssist: could not take a screenshot of the widget', error))
     }, 900)
+  }
+
+  /*
+  The widget's final screenshot, taken now: before it's replaced, or before starting over. One that
+  doesn't come within a moment is skipped, so it never holds up the next widget. `waitForUpload` is
+  for starting over, which must wait until it's filed in this chat's records.
+  */
+  const finalShotTimerRef = useRef<number | undefined>(undefined)
+  const fileFinalScreenshot = async (waitForUpload = false) => {
+    window.clearTimeout(finalShotTimerRef.current)
+    const recordId = recordIdRef.current
+    if (!recordId) return
+    const tooLong = new Promise<null>(resolve => window.setTimeout(() => resolve(null), 1500))
+    const image = await Promise.race([captureInterface().catch(() => null), tooLong])
+    if (!image || recordIdRef.current !== recordId) return
+    const filed = backend.recordScreenshot(recordId, 'final', image)
+    if (waitForUpload) await filed
+  }
+
+  // Retakes the final screenshot once the widget has settled after its checkmarks change
+  const scheduleFinalScreenshot = () => {
+    window.clearTimeout(finalShotTimerRef.current)
+    finalShotTimerRef.current = window.setTimeout(() => { void fileFinalScreenshot() }, 3000)
   }
 
   // Generates the widget for a site and applies it to the page. `reason` says why, for the records.
   const generateWebpageInterface = async (id: string, reason: 'chat' | 'saved' | 'page-change'): Promise<ApplyResult> => {
     try {
       const widget = await backend.generateWidget(id, reason)
+      // the widget being replaced, as it was last seen
+      await fileFinalScreenshot()
+      recordIdRef.current = null
       widgetSiteIdRef.current = siteIdRef.current
       const applied = await applyWidgetAndWait(widget)
       if (applied) {
@@ -447,7 +483,10 @@ function App() {
     }
 
     const stopListening = listenToPage({
-      onCompletionChanged: showLiveUpdate,
+      onCompletionChanged: () => {
+        showLiveUpdate()
+        scheduleFinalScreenshot()
+      },
       onWidgetError: (message) => backend.recordError('widget', message, 'widget'),
       onPageChanged: (change, structural, formControlsAdded) => {
         if (!siteId) return
@@ -548,7 +587,9 @@ function App() {
 
   const handleRestart = () => {
     if (!window.confirm('End this chat and start over? This clears your interface preferences (shared across every site) and removes the current on-page support until you agree on something new.')) return
-    void backend.resetInterface()
+    // the widget's final screenshot goes in this chat's records, before the reset starts new ones
+    void fileFinalScreenshot(true)
+      .then(() => backend.resetInterface())
       .then(async () => {
         const savedList = await refreshSavedList()
         setTranscript([buildFreshIntroEntry(savedList)])
@@ -582,7 +623,8 @@ function App() {
   const saveCurrentInterface = async (name: string): Promise<SavedInterface | null> => {
     if (!name.trim()) return null
     try {
-      const entry = await backend.saveCurrent(name.trim())
+      const entry = await backend.saveCurrent(name.trim(), recordIdRef.current)
+      saveScreenshot(recordIdRef.current, 'saved')
       await refreshSavedList()
       return entry
     } catch (error) {
@@ -593,7 +635,8 @@ function App() {
 
   const updateSavedInterface = async (id: string): Promise<boolean> => {
     try {
-      await backend.updateSaved(id)
+      await backend.updateSaved(id, recordIdRef.current)
+      saveScreenshot(recordIdRef.current, 'saved')
       await refreshSavedList()
       return true
     } catch (error) {

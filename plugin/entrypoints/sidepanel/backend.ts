@@ -68,10 +68,12 @@ export const resetInterface = () => request<InterfaceRepresentationResponse>('/i
 
 export const listSaved = () => request<SavedInterface[]>('/interface-representations')
 
-export const saveCurrent = (name: string) =>
-  request<SavedInterface>('/interface-representations', { method: 'POST', headers: JSON_HEADERS, body: JSON.stringify({ name }) })
+// `recordId` is the interface showing when it's saved, which the study records file the save with
+export const saveCurrent = (name: string, recordId: string | null) =>
+  request<SavedInterface>('/interface-representations', { method: 'POST', headers: JSON_HEADERS, body: JSON.stringify({ name, record_id: recordId }) })
 
-export const updateSaved = (id: string) => request<SavedInterface>(`/interface-representations/${site(id)}/update`, { method: 'POST' })
+export const updateSaved = (id: string, recordId: string | null) =>
+  request<SavedInterface>(`/interface-representations/${site(id)}/update`, { method: 'POST', headers: JSON_HEADERS, body: JSON.stringify({ record_id: recordId }) })
 
 export const deleteSaved = (id: string) => request<{ ok: boolean }>(`/interface-representations/${site(id)}`, { method: 'DELETE' })
 
@@ -82,12 +84,13 @@ export const activateSaved = (id: string) =>
 Study records, kept for each session in user_study/ at the top of the repo
 *************************************************************************************************/
 
-// Saving to the records never interrupts the user, so a failure is only logged
-const quietly = (call: Promise<unknown>) => {
-  void call.catch((error) => console.warn('PageAssist: could not save to the records', error))
-}
+// Saving to the records never interrupts the user, so a failure is only logged. It can be awaited
+// when the next step depends on it being filed first.
+const quietly = (call: Promise<unknown>): Promise<void> =>
+  call.then(() => undefined, (error) => console.warn('PageAssist: could not save to the records', error))
 
-export const recordScreenshot = (recordId: string, reason: 'applied' | 'updated', image: string) =>
+// "final" is the interface as it was last seen, replaced each time
+export const recordScreenshot = (recordId: string, reason: 'applied' | 'updated' | 'saved' | 'final', image: string) =>
   quietly(request('/records/screenshots', { method: 'POST', headers: JSON_HEADERS, body: JSON.stringify({ record_id: recordId, reason, image }) }))
 
 export const recordError = (where: string, message: string, source: 'panel' | 'widget' = 'panel') =>

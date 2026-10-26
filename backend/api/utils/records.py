@@ -271,7 +271,16 @@ def interface(site_id: str, widget: dict[str, Any], tree: dict[str, Any] | None,
         return record_id
 
 
-# A screenshot of an interface, filed with it. Returns false when the record id or image is unusable.
+# The folder an interface's record id points to in the session, if it's there
+def _interface_folder(session: dict[str, Any], record_id: str | None) -> Path | None:
+    if not record_id or not RECORD_ID_RE.match(record_id):
+        return None
+    folder = session["folder"] / "interfaces" / record_id
+    return folder if folder.is_dir() else None
+
+
+# A screenshot of an interface, filed with it. Each reason gets its own file, numbered when there are
+# several, except "final", which is replaced. Returns false when the record id or image is unusable.
 @_quietly(False)
 def screenshot(record_id: str, reason: str, image: str) -> bool:
     if not RECORD_ID_RE.match(record_id or "") or not REASON_RE.match(reason or ""):
@@ -289,17 +298,20 @@ def screenshot(record_id: str, reason: str, image: str) -> bool:
         session = _current()
         if session is None:
             return False
-        target = session["folder"] / "interfaces" / record_id
-        if not target.is_dir():
+        target = _interface_folder(session, record_id)
+        if target is None:
             return False
         extension = "png" if match.group(1) == "png" else "jpg"
         name = f"screenshot-{reason}.{extension}"
+        # the final screenshot is the interface as it was last seen, so it's replaced as it changes
+        new = reason != "final" or not (target / name).exists()
         n = 2
-        while (target / name).exists():
+        while reason != "final" and (target / name).exists():
             name = f"screenshot-{reason}-{n}.{extension}"
             n += 1
         (target / name).write_bytes(data)
-        session["summary"]["screenshots"] += 1
+        if new:
+            session["summary"]["screenshots"] += 1
         _write_summary()
         return True
 
@@ -316,8 +328,25 @@ def error(source: str, where: str, message: str) -> None:
         _write_summary()
 
 
-# Something else worth keeping: saving, updating or deleting a saved interface, or how a page change
-# was applied to the interface
+# Saving the working interface representation, or updating a saved one: the event, and in the meta of
+# the interface that was showing, the name it was saved as
+@_quietly()
+def saved(kind: str, entry_id: str, name: str, record_id: str | None) -> None:
+    with _lock:
+        session = _current()
+        if session is None:
+            return
+        target = _interface_folder(session, record_id)
+        _append("events.jsonl", {"kind": kind, "id": entry_id, "name": name[:200], "interface": target.name if target else None})
+        if target is not None:
+            meta = json.loads((target / "meta.json").read_text(encoding="utf-8"))
+            meta.setdefault("saved", []).append({"name": name[:200], "at": _now(), "how": kind})
+            _write(target / "meta.json", meta)
+        _write_summary()
+
+
+# Something else worth keeping: deleting a saved interface, or how a page change was applied to the
+# interface
 @_quietly()
 def event(kind: str, details: dict[str, Any]) -> None:
     with _lock:

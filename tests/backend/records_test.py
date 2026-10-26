@@ -114,6 +114,12 @@ check("a screenshot is filed with its interface", r.status_code == 200 and (fold
 c.post("/records/screenshots", json={"record_id": record_id, "reason": "updated", "image": PNG})
 c.post("/records/screenshots", json={"record_id": record_id, "reason": "updated", "image": PNG})
 check("  later ones are numbered, not overwritten", (folder / "screenshot-updated-2.png").exists())
+shots_before = summary()["screenshots"]
+c.post("/records/screenshots", json={"record_id": record_id, "reason": "final", "image": PNG})
+c.post("/records/screenshots", json={"record_id": record_id, "reason": "final", "image": PNG})
+check("the final screenshot is replaced as the interface changes, not numbered",
+      (folder / "screenshot-final.png").exists() and not (folder / "screenshot-final-2.png").exists())
+check("  and counted once", summary()["screenshots"] == shots_before + 1, str(summary()["screenshots"]))
 check("a record id that points outside the session is refused",
       c.post("/records/screenshots", json={"record_id": "../../escape", "image": PNG}).status_code == 400)
 check("  as is one for an interface that doesn't exist", c.post("/records/screenshots", json={"record_id": "099-nothing", "image": PNG}).status_code == 400)
@@ -121,13 +127,21 @@ check("  and anything that isn't an image", c.post("/records/screenshots", json=
 
 print("\n== errors and events ==")
 c.post("/records/errors", json={"source": "widget", "where": "render", "message": "items is not iterable"})
-saved = c.post("/interface-representations", json={"name": "Question checklist"}).json()
+saved = c.post("/interface-representations", json={"name": "Question checklist", "record_id": record_id}).json()
+c.post(f"/interface-representations/{saved['id']}/update", json={"record_id": record_id})
+c.post("/interface-representations", json={"name": "Saved with nothing showing"})
 c.post(f"/interface-representations/{saved['id']}/activate")
 c.post("/records/events", json={"kind": "page change", "details": {"outcome": "spliced", "added": 1}})
 errors = lines("errors.jsonl")
 check("an error from the widget is kept", errors and errors[-1]["source"] == "widget", str(errors))
 events = [e["kind"] for e in lines("events.jsonl")]
-check("saving an interface and a page change are kept as events", events == ["saved interface", "page change"], str(events))
+check("saving and updating an interface and a page change are kept as events",
+      events == ["saved interface", "updated saved interface", "saved interface", "page change"], str(events))
+saves = [e for e in lines("events.jsonl") if "saved interface" in e["kind"]]
+check("  each save names the interface that was showing", [e["interface"] for e in saves] == [record_id, record_id, None], str(saves))
+meta = json.loads((folder / "meta.json").read_text())
+check("  and that interface's meta lists what it was saved as",
+      [(e["name"], e["how"]) for e in meta.get("saved", [])] == [("Question checklist", "saved interface"), ("Question checklist", "updated saved interface")], str(meta.get("saved")))
 activated = json.loads(sorted((session_folder() / "interface_representations").iterdir())[-1].read_text())
 check("using a saved interface again is kept as a new version", activated["source"] == 'activated saved interface "Question checklist"', activated["source"])
 
@@ -139,7 +153,7 @@ finally:
 backend_error = lines("errors.jsonl")[-1]
 check("a failed model call is kept, by its route rather than the page address",
       backend_error["source"] == "backend" and backend_error["where"] == "/task-representations/{site_id}/analyze", str(backend_error))
-check("the summary counts all of it", summary()["errors"] == 2 and summary()["screenshots"] == 3 and summary()["interfaces_built"] == 1, str(summary()))
+check("the summary counts all of it", summary()["errors"] == 2 and summary()["screenshots"] == 4 and summary()["interfaces_built"] == 1, str(summary()))
 
 print("\n== a new chat starts a new folder ==")
 c.post("/interface-representation/reset")

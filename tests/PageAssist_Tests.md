@@ -31,8 +31,10 @@ PYTHONPATH=backend backend/.venv/bin/python tests/backend/records_test.py      #
   each interface keeps its code, items, iterations, and the two representations it was built from;
   screenshots are filed with their interface, numbered rather than overwritten, and refused for a
   record id outside the session or anything that isn't an image; errors and events are kept; page
-  addresses keep no query string and no page text is kept; a session folder removed while running
-  is started again, and a record that can't be written is skipped instead of failing the chat.
+  addresses keep no query string and no page text is kept; the final screenshot is replaced as the
+  interface changes; a save or an update of a saved interface is filed with the interface that was
+  showing; a session folder removed while running is started again, and a record that can't be
+  written is skipped instead of failing the chat.
 - **structural_update_test.py** — a revealed field (answering "Are you Hispanic/Latino?" on the
   Greenhouse/Snorkel page reveals `#race`) must flow into the widget's `state.items`, via both the
   full re-analyze path and the fast `/task-representations/{id}/patch` path (splice + regenerate,
@@ -71,7 +73,11 @@ node tests/plugin/screenshot.test.ts
   tabs, and a submit input whose value isn't an answer; a toggle button or a dropdown button showing
   its choice is not an action. Also custom sliders and spin buttons, custom textboxes, standalone
   listboxes, a mixed checkbox, and labels judged by what they name (a `<label>`, an `aria-labelledby`
-  label, a legend, a matrix row's header).
+  label, a legend, a matrix row's header). completion.ashby.test.ts also has markup taken from the
+  live Creatify application: Yes/No toggle buttons over a hidden checkbox that stays unchecked for
+  "No", whose label's `for` names no element, judged from the label, either button, the hidden
+  checkbox, the field, or an item bundling them; and the resume upload, answered once the upload
+  area shows the file even after the page empties its input, but not by a list of accepted types.
 - **selectors.test.ts** — the real `plugin/lib/selectors.ts` names: links, buttons and headings named
   by their own text, `aria-labelledby` before `aria-label`, and nothing truncated; and
   `stableSelector` always unique: radios sharing a name told apart by value, look-alikes scoped
@@ -147,9 +153,13 @@ node tests/e2e/live_sites.mjs --sites kargo --interfaces checklist   # a quicker
   - On Kargo it answers Hispanic/Latino "No" and checks the race question is spliced into the widget
     that's showing.
   - It saves interfaces and moves them between pages, in both directions.
+  - On Creatify, answering the Yes/No questions with their buttons and uploading a resume must tick
+    off their items, and the resume must stay ticked off once the page empties its file input.
+  - Once a page has loaded, every request it would send is dropped (Ashby saves each answer and
+    uploads a chosen file straight away), so nothing typed or chosen leaves the machine.
   - It never submits a form. It needs network access, a model in `backend/.env`, and Chrome: set
     `CHROME_PATH`, or it uses Playwright's Chromium.
   - It also checks each page's study records, filed as the side panel files them: every chat turn,
-    every interface with its code, the representations it was built from, a screenshot and the
-    iterations that led to it, the task and interface representations, and every page change it
-    followed.
+    every interface with its code, the representations it was built from, its screenshots (including
+    the final one, and one of what was saved) and the iterations that led to it, every save filed with
+    its interface, the task and interface representations, and every page change it followed.

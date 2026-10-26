@@ -97,7 +97,8 @@ export function isItemRequired(selectors: string[], resolve: (selector: string) 
 Splicing a page change into a live widget
 *************************************************************************************************/
 
-const ANSWER_ROLES = '[role="combobox"], [role="radiogroup"], [role="radio"], [role="checkbox"], [role="switch"], [role="listbox"], [role="textbox"], [role="spinbutton"], [role="slider"]';
+// toggle buttons (aria-pressed) hold an answer too, like a Yes/No pair
+const ANSWER_ROLES = '[role="combobox"], [role="radiogroup"], [role="radio"], [role="checkbox"], [role="switch"], [role="listbox"], [role="textbox"], [role="spinbutton"], [role="slider"], [aria-pressed]';
 const NON_ANSWER_INPUT_TYPES = new Set(['hidden', 'submit', 'button', 'reset', 'image']);
 
 function isAnswerControl(element: Element): boolean {

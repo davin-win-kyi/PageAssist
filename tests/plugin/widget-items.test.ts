@@ -67,6 +67,17 @@ console.log('\n== only answerable controls complete a multi-control question =='
   check('the "Accepted file types" line is not a control of the resume question',
     nonAnswerMembers(['#resume', '#accepted-filetypes'], at), ['#accepted-filetypes']);
   check('every real control of a question counts (first + last name)', nonAnswerMembers(['#first_name', '#last_name'], at), []);
+  const ashby = page(`<div class="ashby-application-form-field-entry">
+    <label for="8b35931a">Are you legally authorized to work in the United States?</label>
+    <div class="ashby-application-form-input-yesno"><button aria-pressed="false" id="yes">Yes</button><button aria-pressed="true" id="no">No</button>
+    <input type="checkbox" tabindex="-1" name="8b35931a"></div></div>
+    <div class="ashby-application-form-field-entry"><label for="resume">Resume</label><div class="ashby-application-form-input-file">
+    <input type="file" tabindex="-1" id="resume"><button id="upload">Upload File</button></div></div>`);
+  const atAshby = (selector: string) => ashby.querySelector(selector);
+  check('Yes/No toggle buttons are the answer, so a label bundled with them is left out (Creatify)',
+    nonAnswerMembers(['label[for="8b35931a"]', '#yes', '#no'], atAshby), ['label[for="8b35931a"]']);
+  check('an upload\'s button and label are left out, so the file input decides (Creatify)',
+    nonAnswerMembers(['label[for="resume"]', '#resume', '#upload'], atAshby), ['label[for="resume"]', '#upload']);
   check('a member that isn\'t on the page isn\'t excluded (it isn\'t answered)', nonAnswerMembers(['#first_name', '#gone'], at), []);
   check('a single selector, or a question with no real control, is left alone',
     [nonAnswerMembers(['#accepted-filetypes'], at), nonAnswerMembers(['#accepted-filetypes', '#upload-label-resume'], at)], [[], []]);

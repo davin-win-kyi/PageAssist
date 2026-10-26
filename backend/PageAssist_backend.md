@@ -160,13 +160,13 @@ that confusion.
 | `GET /interface-representation` | The active **interface representation** (the working preference tree) + its `agreed` flag. |
 | `POST /interface-representation/reset` | Blank the active tree and clear `agreed` — this is what "new chat" / "end chat and start over" calls. |
 | `GET /interface-representations` | List saved, reusable interface-representation entries (`{id, name}`) — the "Saved" tab's data. |
-| `POST /interface-representations` | Save the active tree as a new named entry in that reusable database. |
+| `POST /interface-representations` | Save the active tree as a new named entry in that reusable database: `{name, record_id?}`, where `record_id` is the interface showing, which the study records file the save with. |
 | `POST /interface-representations/{id}/activate` | Copy a saved entry into the active tree (this counts as agreement — the widget can be generated from it immediately). |
-| `POST /interface-representations/{id}/update` | Write the current active tree back onto that saved entry (overwrite it with whatever chat has since refined). |
+| `POST /interface-representations/{id}/update` | Write the current active tree back onto that saved entry (overwrite it with whatever chat has since refined). An optional `{record_id}` body files the update with the interface showing. |
 | `DELETE /interface-representations/{id}` | Remove a saved entry. The working tree is untouched — if it came from this entry, it's just unlinked (no more "update the one I came from" offer). |
 | `POST /chat` | One conversational turn. May reply with text only, or also replace the active interface representation and/or flip `agreed` to true (the model's "this concept is concrete enough to show" signal). |
 | `POST /webpage-interfaces/{site_id}/generate?reason=` | Combine the stored task representation + the active interface representation into a **webpage interface** (a concrete, model-generated widget); hold it in memory and return it. This is the call that actually produces the thing that shows up on the page. `reason` (`chat`, `saved` or `page-change`) says why it was built, and the widget comes back with the `record_id` it's filed under in the study records. |
-| `POST /records/screenshots` | A screenshot of an interface, `{record_id, reason, image}` as a PNG or JPEG data URL, filed with it in the records. Refused for an interface that isn't in the current session. |
+| `POST /records/screenshots` | A screenshot of an interface, `{record_id, reason, image}` as a PNG or JPEG data URL, filed with it in the records. `reason` is `applied`, `updated`, `saved` or `final`; each gets its own numbered file, except `final`, which is replaced. Refused for an interface that isn't in the current session. |
 | `POST /records/errors` | An error the side panel showed, or one from the widget's code: `{source, where, message}`. |
 | `POST /records/events` | Something else worth keeping, such as how a page change was applied to the interface: `{kind, details}`. |
 | `GET /webpage-interfaces/{site_id}` | Read the in-memory widget (404 after a restart, or for another site — nothing is regenerated automatically). |
@@ -196,12 +196,16 @@ user_study/2026-10-20_14-03-11/
     interface_representation.json the interface representation it was built from
     task_representation.json      the task representation it was built from, so each interface is
                                   complete even in a session that started over without a new analysis
-    meta.json                     why it was built, how long it took, its items, and the iterations
-                                  that led to it
+    meta.json                     why it was built, how long it took, its items, the iterations
+                                  that led to it, and the names it was saved as
     screenshot-applied.png        the widget when it appeared, taken by the side panel
     screenshot-updated.png        the widget after a page change was spliced into it
+    screenshot-saved.png          the widget when it was saved, or a saved one was updated
+    screenshot-final.png          the widget as it was last seen: retaken a few seconds after its
+                                  checkmarks change, and just before it's replaced or the user starts over
   errors.jsonl                    errors from the backend, the side panel and the widget's code
-  events.jsonl                    interfaces saved, updated or deleted, and how page changes were applied
+  events.jsonl                    interfaces saved, updated or deleted (a save names the interface that
+                                  was showing), and how page changes were applied
 ```
 
 `summary.json` counts the iterations: `chat_turns`, `turns_to_agreement` (the turn on which the user
