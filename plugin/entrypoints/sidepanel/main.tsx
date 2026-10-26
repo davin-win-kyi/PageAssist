@@ -1,3 +1,7 @@
+/*
+The following file mounts App.tsx into the side panel page
+*/
+
 import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
 import App from './App'

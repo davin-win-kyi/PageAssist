@@ -1,3 +1,8 @@
+/*
+This is the logic nessecary to apply and check the 
+safety of a given widget
+*/
+
 // filter unsafe values which could be applied
 export function isSafeStyleValue(value: string): boolean {
   const lower = value.toLowerCase();

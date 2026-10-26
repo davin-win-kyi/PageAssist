@@ -1,13 +1,20 @@
 /*
+To scan-page and craft them into task representation ready elements for the creation
+of the task representation, and to keep a snapshot of the page's questions for mutations
+
 TASKS:
-- being able to parse through information and format it into 
-  the nessecary format for Task Representation Generation 
-- being able to distinguish between exsisting element changes 
-  and structural changes that should be accounted for in the interface
+- Page-scanner logic: being able to parse through information and format relevant elements into
+  the nessecary format for Task Representation Generation
+- Snapshots: being able to distinguish between exsisting element changes and structural changes
+  between two scans, which mutations.ts uses to decide if the interface should be updated
 */
+
 import { isElementComplete } from './completion.ts';
 import { computeAccessibleDescription, computeAccessibleName, computeRole, stableSelector } from './selectors.ts';
 
+/*
+An element as sent to the backend for the task representation
+*/
 export type ScannedElement = {
   id: string;               
   selector: string;
@@ -21,19 +28,26 @@ export type ScannedElement = {
   visible: boolean;
 };
 
-// A structural grouping elements sit in, so the backend can tell which ones belong together without
-// guessing from flat document order.
+/*
+A grouping elements sit in, so the backend can tell which belong together
+*/
 export type ScannedContainer = {
   selector: string;
   tag: string;
   role: string;
-  label: string;             // legend / caption / summary / figcaption / heading / ARIA name
-  parent: string;            // selector of its own nearest context container ('' = top level)
+  // legend / caption / summary / figcaption / heading / ARIA name
+  label: string;        
+  // selector of its own nearest context container ('' = top level)     
+  parent: string;            
 };
 
-//////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
-// What the backend sees: answerable controls, the instructional content around them, and visual
-// context.
+/*************************************************************************************************
+Selectors
+*************************************************************************************************/
+
+/*
+The elements the scan collects
+*/
 export const PAGE_ELEMENT_SELECTOR = [
   'input:not([type="hidden"])',
   'textarea',
@@ -57,7 +71,9 @@ export const PAGE_ELEMENT_SELECTOR = [
   '[contenteditable]',
 ].join(',');
 
-// Recorded per element (`container`) to keep the relationships between elements.
+/*
+Groupings the scan reports as containers, so the backend can tell which elements belong together
+*/
 export const CONTEXT_CONTAINER_SELECTOR = [
   'main,article,section,form,fieldset',
   'ol,ul,dl,table,tr',
@@ -67,51 +83,131 @@ export const CONTEXT_CONTAINER_SELECTOR = [
   '[role="list"],[role="table"],[role="row"],[role="dialog"],[role="alertdialog"],[role="figure"]',
 ].join(',');
 
-// Transient layers anchored to some other control — an open dropdown's option list and its filter
-// box, a tooltip, an autocomplete list, a date picker's calendar. Their contents pop in and out and are
-// never page structure or a question of their own.
+/*
+Temporary layers that belong to a control, like dropdown lists, menus, tooltips, suggestions and
+date pickers. Their contents aren't page elements and their changes aren't page changes.
+- names a field's own wrapper also uses, like "dropdown", are matched only in their popup forms
+- layers that can also hold a dialog are left out, since a dialog can hold real questions
+*/
 export const POPUP_SELECTOR = [
+  // ARIA roles
   '[role="listbox"]', '[role="menu"]', '[role="tooltip"]',
+  // Generic class names
   '[class*="menu" i]', '[class*="popover" i]', '[class*="popup" i]', '[class*="tooltip" i]',
-  '[class*="option-list" i]', '[class*="options-list" i]',
-  // Floating layers and date-picker calendars: popper.js, flatpickr, Pikaday, jQuery UI, Ant Design
-  '[class*="popper" i]', '[class*="flatpickr-calendar" i]', '[class*="pika-single" i]',
-  '[class*="ui-datepicker" i]', '[class*="picker-dropdown" i]',
+  '[class*="option-list" i]', '[class*="options-list" i]', '[class*="dropdown-menu" i]',
+  '[class*="dropdown-content" i]', '[class*="dropdown-panel" i]',
+  '[class*="autocomplete-results" i]', '[class*="autocomplete-suggestions" i]', '[class*="suggestions-list" i]',
+  // Floating-layer libraries: popper.js, Floating UI, Radix, Headless UI, Tippy
+  '[class*="popper" i]', '[data-popper-placement]', '[data-floating-ui-portal]', '[data-radix-popper-content-wrapper]',
+  '[id^="headlessui-listbox-options"]', '[id^="headlessui-menu-items"]', '[id^="headlessui-popover-panel"]',
+  '[id^="headlessui-combobox-options"]', '[data-tippy-root]', '.tippy-box',
+  // Select and autocomplete libraries: Select2, Chosen, Selectize, Tom Select, Choices.js, Google Places,
+  // intl-tel-input, twitter typeahead, jQuery UI
+  '.select2-dropdown', '.select2-results', '.chosen-drop', '.selectize-dropdown', '.ts-dropdown',
+  '.choices__list--dropdown', '.pac-container', '.iti__dropdown-content', '.iti__country-list', '.tt-menu',
+  '.ui-autocomplete',
+  // Component frameworks: Angular Material / CDK, Ant Design, Element, Vuetify, PrimeReact, Kendo
+  '.cdk-overlay-pane', '.mat-mdc-select-panel', '.mat-mdc-autocomplete-panel', '.mat-select-panel',
+  '.mat-autocomplete-panel', '.ant-select-dropdown', '.ant-picker-dropdown', '.ant-dropdown',
+  '.ant-cascader-dropdown', '.el-select-dropdown', '.el-picker-panel', '.el-popper', '.v-menu__content',
+  '.p-dropdown-panel', '.p-multiselect-panel', '.p-autocomplete-panel', '.p-overlaypanel',
+  '.k-animation-container', '.k-popup',
+  // Date pickers: flatpickr, Pikaday, jQuery UI, react-datepicker, MUI, bootstrap-datepicker,
+  // daterangepicker, Air Datepicker, vue-datepicker
+  '[class*="flatpickr-calendar" i]', '[class*="pika-single" i]', '[class*="ui-datepicker" i]',
+  '[class*="picker-dropdown" i]', '.react-datepicker-popper', '.MuiPickersPopper-root', '.datepicker-dropdown',
+  '.daterangepicker', '.air-datepicker', '.vdp-datepicker__calendar', '.mx-datepicker-popup',
 ].join(', ');
+
+/*
+Dialogs, which are real page layers that can hold real questions
+*/
 const DIALOG_SELECTOR = 'dialog, [role="dialog"], [role="alertdialog"], [aria-modal="true"]';
-// Only ever looked for INSIDE a dialog — on the date field's own ancestors these would match the field
-// itself (react-datepicker's "react-datepicker-wrapper", jQuery UI's "hasDatepicker").
+
+/*
+Calendars, so a date picker shown as a dialog still counts as temporary
+*/
 const CALENDAR_SELECTOR = '[role="grid"], [class*="calendar" i], [class*="datepicker" i], [class*="date-picker" i], [class*="daypicker" i], [class*="day-picker" i]';
 
-// Answerable controls — what a question's answer is entered into. Their set is what structural-change
-// detection diffs.
+/*
+Controls that answer a question
+*/
 export const FIELD_NODE_SELECTOR = [
   'input:not([type="hidden"]):not([type="submit"]):not([type="button"]):not([type="reset"]):not([type="image"])',
   'textarea', 'select',
   '[role="textbox"]', '[role="combobox"]', '[role="checkbox"]', '[role="radio"]', '[role="searchbox"]',
-  '[role="spinbutton"]', '[role="switch"]',
+  '[role="spinbutton"]', '[role="switch"]', '[role="slider"]',
 ].join(', ');
 
-// - MAX_ELEMENTS_TO_COLLECT — hard stop on the recursive scan so a design-system-heavy page can't make
-//   this slow enough that the caller's timeout treats the page as unreachable.
-// - MAX_ELEMENTS_TO_SEND — how many actually go to the model (after the priority sort).
-// - MAX_TREE_DEPTH — backstop against pathological shadow/iframe nesting.
+/*
+Caps on how much the scan collects and sends
+*/
 const MAX_ELEMENTS_TO_COLLECT = 900;
 const MAX_ELEMENTS_TO_SEND = 500;
 const MAX_TREE_DEPTH = 12;
 
-//////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+/*************************************************************************************************
+Visibility and temporary layers
+*************************************************************************************************/
 
-// Rough visibility: rendered box or client rects present, and not display:none / visibility:hidden.
-export function isElementVisible(element: Element): boolean {
-  if (!(element instanceof HTMLElement)) return true;
-  if (element.hidden) return false;
-  if (element.offsetWidth === 0 && element.offsetHeight === 0 && element.getClientRects().length === 0) return false;
-  const style = element.ownerDocument.defaultView?.getComputedStyle(element);
-  return !style || (style.visibility !== 'hidden' && style.display !== 'none');
+/*
+What the containers around an element do to it: `faded` when one has opacity 0 or
+content-visibility hidden, and `clipped` when one clips its content at zero size. A fixed element
+escapes the clipping of the containers around it.
+*/
+export type VisibilityCache = Map<Element, { faded: boolean; clipped: boolean }>;
+function aroundElement(node: Element | null, view: Window, cache: VisibilityCache): { faded: boolean; clipped: boolean } {
+  if (!node || node === node.ownerDocument.body || node === node.ownerDocument.documentElement) return { faded: false, clipped: false };
+  const known = cache.get(node);
+  if (known) return known;
+  const style = view.getComputedStyle(node);
+  const outer = aroundElement(node.parentElement, view, cache);
+  const zeroSize = (node as HTMLElement).offsetHeight === 0 || (node as HTMLElement).offsetWidth === 0;
+  const clips = /hidden|clip/.test(style.overflow || '') && style.display !== 'contents' && zeroSize;
+  const result = {
+    faded: outer.faded || style.opacity === '0' || style.contentVisibility === 'hidden',
+    clipped: clips || (style.position !== 'fixed' && outer.clipped),
+  };
+  cache.set(node, result);
+  return result;
 }
 
-// The same-origin document inside an <iframe>, or null (cross-origin, not yet loaded, sandboxed).
+/*
+Whether an element is shown: not hidden or inert, with a box, not display none, visibility hidden or
+collapse, or opacity 0, and not faded or clipped by a container around it. A control's own opacity is
+ignored, since styled radios and checkboxes hide the native input behind a custom one.
+- one scan shares a cache, so each container is only checked once
+*/
+export function isElementVisible(element: Element, cache: VisibilityCache = new Map()): boolean {
+  if (!(element instanceof HTMLElement)) return true;
+  if (element.hidden || element.closest('[inert]')) return false;
+  if (element.offsetWidth === 0 && element.offsetHeight === 0 && element.getClientRects().length === 0) return false;
+  const view = element.ownerDocument.defaultView;
+  const style = view?.getComputedStyle(element);
+  if (!view || !style) return true;
+  if (style.display === 'none' || style.visibility === 'hidden' || style.visibility === 'collapse') return false;
+  if (style.contentVisibility === 'hidden') return false;
+  if (style.opacity === '0' && !element.matches(FIELD_NODE_SELECTOR)) return false;
+  if (isHiddenHelperField(element)) return false;
+  const outer = aroundElement(element.parentElement, view, cache);
+  return !outer.faded && (style.position === 'fixed' || !outer.clipped);
+}
+
+/*
+A field no one can reach: out of the tab order, and hidden from assistive technology or moved far
+off the page. Such as a form's spam trap ("Do not fill out this field") or a dropdown's hidden
+validation input. A visually hidden native radio stays in the tab order, so it isn't one.
+*/
+function isHiddenHelperField(element: HTMLElement): boolean {
+  if (element.getAttribute('tabindex') !== '-1' || !element.matches(FIELD_NODE_SELECTOR)) return false;
+  if (element.closest('[aria-hidden="true"]')) return true;
+  const rect = element.getBoundingClientRect?.();
+  return !!rect && (rect.right < -100 || rect.bottom < -100 - (element.ownerDocument.defaultView?.scrollY ?? 0));
+}
+
+/*
+A same-origin iframe's document, or null when it can't be read
+*/
 function readableFrameDoc(frame: Element): Document | null {
   try {
     return (frame as HTMLIFrameElement).contentDocument || null;
@@ -120,34 +216,63 @@ function readableFrameDoc(frame: Element): Document | null {
   }
 }
 
-// A popup-looking class on a page-level wrapper doesn't make the page a popup: WordPress themes put
-// "sticky-menu-fade" and "dropdown-hover" on <body>, which would otherwise read every element on the page
-// as part of an open dropdown. A transient layer never holds the page itself — <html>/<body>, its main
-// content, its <h1>, or a whole form.
+/*
+Whether a layer holds the page itself (body, main, a form), so a wide class match like "menu" on
+it isn't taken as a popup
+*/
 const PAGE_LEVEL_SELECTOR = 'main, article, form, h1, [role="main"]';
 function isPageLevel(layer: Element): boolean {
   return layer.matches('html, body') || layer.matches(PAGE_LEVEL_SELECTOR) || !!layer.querySelector(PAGE_LEVEL_SELECTOR);
 }
 
 /*
-Check for a transient layer (anything that pops up temporary)
-- checks if dialog and if it is a calendar
-- other checks are for all possible other checks 
+The popups an open dropdown or menu points at through aria-controls or aria-owns, found even when
+their classes say nothing. Cached briefly since the scan asks for every element.
+*/
+const POPUP_TRIGGER_SELECTOR = '[aria-expanded="true"][aria-haspopup]:not([aria-haspopup="false"]):not([aria-haspopup="dialog"]), [role="combobox"][aria-expanded="true"]';
+let controlledCache: { doc: Document; at: number; selector: string } | null = null;
+function controlledPopupSelector(doc: Document): string {
+  const now = Date.now();
+  if (controlledCache && controlledCache.doc === doc && now - controlledCache.at < 250) return controlledCache.selector;
+  const ids = new Set<string>();
+  doc.querySelectorAll(POPUP_TRIGGER_SELECTOR).forEach((trigger) => {
+    for (const attr of ['aria-controls', 'aria-owns']) {
+      (trigger.getAttribute(attr) || '').split(/\s+/).filter(Boolean).forEach((id) => ids.add(id));
+    }
+  });
+  const selector = [...ids].map((id) => `[id="${id.replace(/["\\]/g, '\\$&')}"]`).join(', ');
+  controlledCache = { doc, at: now, selector };
+  return selector;
+}
+
+function nearestPopup(element: Element): Element | null {
+  const named = element.closest(POPUP_SELECTOR);
+  if (named && !isPageLevel(named)) return named;
+  const controlled = controlledPopupSelector(element.ownerDocument);
+  const open = controlled ? element.closest(controlled) : null;
+  return open && !isPageLevel(open) ? open : null;
+}
+
+/*
+Whether an element sits in a temporary layer. A dialog is a real layer unless it's a date picker; a
+dropdown open inside a dialog is still temporary.
 */
 export function isInTransientLayer(element: Element): boolean {
-  const nearest = element.closest(POPUP_SELECTOR);
-  const popup = nearest && !isPageLevel(nearest) ? nearest : null;
+  const popup = nearestPopup(element);
   const dialog = element.closest(DIALOG_SELECTOR);
-  // A dialog is a real page layer that can hold real questions, even one whose classes say "popup" —
-  // unless the dialog is itself a date picker. A dropdown open INSIDE a dialog is still transient.
   if (dialog && (!popup || popup.contains(dialog))) {
     return dialog.matches(CALENDAR_SELECTOR) || !!dialog.querySelector(CALENDAR_SELECTOR);
   }
   return !!popup;
 }
 
-//////////////////////////////////////////////////////////////////////////////////////////
+/*************************************************************************************************
+Scanning
+*************************************************************************************************/
 
+/*
+Collects the elements, including those in shadow roots and same-origin iframes
+*/
 export function collectElementsDeep(root: Document | ShadowRoot, into: Element[], depth = 0) {
   if (into.length >= MAX_ELEMENTS_TO_COLLECT || depth > MAX_TREE_DEPTH) return;
   into.push(...root.querySelectorAll(PAGE_ELEMENT_SELECTOR));
@@ -161,8 +286,10 @@ export function collectElementsDeep(root: Document | ShadowRoot, into: Element[]
   }
 }
 
-// For the analyze payload: how many iframes are on the page and how many we could actually read into.
-// sameOrigin === 0 && crossOrigin > 0 on a form page means the fields are unreachable.
+/*
+How many iframes can and can't be read. No form controls next to only cross-origin frames
+usually means the form is in a frame the extension can't reach.
+*/
 export function countFrames() {
   let sameOrigin = 0;
   let crossOrigin = 0;
@@ -173,7 +300,9 @@ export function countFrames() {
   return { sameOrigin, crossOrigin };
 }
 
-// Priority elements for forms
+/*
+Controls, labels and headings go first, so the send cap never drops them
+*/
 const PRIORITY_ROLES = new Set(['textbox', 'combobox', 'listbox', 'checkbox', 'radio', 'switch', 'slider', 'spinbutton', 'searchbox']);
 function isPriorityElement(element: Element): boolean {
   const tag = element.tagName.toLowerCase();
@@ -183,10 +312,11 @@ function isPriorityElement(element: Element): boolean {
   return !!role && PRIORITY_ROLES.has(role);
 }
 
-// method to mark if an element is complete or not 
+/*
+Whether a control is answered right now ('' for anything that isn't a control)
+*/
 function completionStatus(element: Element, selector: string): ScannedElement['completion_status'] {
   if (!element.matches(FIELD_NODE_SELECTOR) && !(element as HTMLElement).isContentEditable) return '';
-  // A completion read must never cost the element its place in the scan.
   try {
     return isElementComplete(element, selector) ? 'complete' : 'incomplete';
   } catch {
@@ -194,17 +324,22 @@ function completionStatus(element: Element, selector: string): ScannedElement['c
   }
 }
 
-// Get the container for an element
+/*
+The nearest container around an element, crossing out of a shadow root
+*/
 function nearestContainer(element: Element): Element | null {
   const found = element.parentElement?.closest(CONTEXT_CONTAINER_SELECTOR);
   if (found) return found;
   const root = element.getRootNode?.();
-  const host = root?.nodeType === 11 ? (root as ShadowRoot).host : null; // 11 = DOCUMENT_FRAGMENT_NODE
+  // 11 = DOCUMENT_FRAGMENT_NODE, a shadow root
+  const host = root?.nodeType === 11 ? (root as ShadowRoot).host : null;
   if (!host) return null;
   return host.matches(CONTEXT_CONTAINER_SELECTOR) ? host : nearestContainer(host);
 }
 
-// Method to get heading
+/*
+A container's own top heading, when it has exactly one
+*/
 function ownHeading(container: Element): Element | undefined {
   const own = [...container.querySelectorAll('h1, h2, h3, h4, h5, h6')].filter((h) => nearestContainer(h) === container);
   const top = Math.min(...own.map((h) => Number(h.tagName[1])));
@@ -212,6 +347,9 @@ function ownHeading(container: Element): Element | undefined {
   return atTop.length === 1 ? atTop[0] : undefined;
 }
 
+/*
+A container's label: its accessible name, else its caption child or own heading
+*/
 const CAPTION_CHILD: Record<string, string> = { fieldset: 'legend', table: 'caption', details: 'summary', figure: 'figcaption', tr: 'th' };
 function containerLabel(container: Element): string {
   const named = computeAccessibleName(container);
@@ -223,21 +361,29 @@ function containerLabel(container: Element): string {
   return (caption?.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 120);
 }
 
+/*
+A scan's result. Elements and containers go to the backend; fields are kept to diff against the
+next scan.
+*/
 export type PageScan = {
   elements: ScannedElement[];
   containers: ScannedContainer[];
   fields: FieldSnapshot;
 };
 
+/*
+Scans the page: leaves out temporary layers, ranks controls first, then records each element,
+its container and, for controls, its question
+*/
 export function scanPage(): PageScan {
   try {
     const collected: Element[] = [];
     collectElementsDeep(document, collected);
-    // Stable sort
+    const visibility: VisibilityCache = new Map();
     const ranked = collected
       .filter((element) => { try { return !isInTransientLayer(element); } catch { return true; } })
       .map((element) => {
-        try { return { element, visible: isElementVisible(element), priority: isPriorityElement(element) }; }
+        try { return { element, visible: isElementVisible(element, visibility), priority: isPriorityElement(element) }; }
         catch { return { element, visible: true, priority: false }; }
       })
       .sort((a, b) => (Number(!a.priority) - Number(!b.priority)) || (Number(!a.visible) - Number(!b.visible)));
@@ -277,6 +423,7 @@ export function scanPage(): PageScan {
           visible,
         };
         elements.push(record);
+
         if (element.matches(FIELD_NODE_SELECTOR)) {
           const key = fieldKey(element, selector);
           const entry: FieldEntry = fields.get(key) ?? { visible: false, elements: [] };
@@ -295,9 +442,9 @@ export function scanPage(): PageScan {
   }
 }
 
-// Function decides which containers to keep, because it is possible that some containers 
-// are not referenced by any elements, and we want to remove those containers from the scan 
-// - drop containsers with nothing meaningful inside them 
+/*
+Only the containers the given elements sit in, with their ancestors
+*/
 export function containersReferencedBy(elements: ScannedElement[], containers: ScannedContainer[]): ScannedContainer[] {
   const bySelector = new Map(containers.map((container) => [container.selector, container]));
   const out = new Map<string, ScannedContainer>();
@@ -311,12 +458,9 @@ export function containersReferencedBy(elements: ScannedElement[], containers: S
   return [...out.values()];
 }
 
-//////////////////////////////////////////////////////////////////////////////////////////
-
-// The page's readable prose — for widget items that are page CONTENT (recipe steps, article sections)
-// rather than form fields. Top document + same-origin iframes, capped generously: for a tutorial the
-// prose IS the steps, and a step past the cut can never reach the widget. Matches the backend's
-// PAGE_TEXT_LIMIT (definitions/task/schema.py).
+/*
+The page's readable text, in full, for content the element scan only gets a snippet of
+*/
 export function getPageText(cap = 60_000): string {
   const parts: string[] = [];
   const push = (doc: Document | null) => {
@@ -333,24 +477,19 @@ export function getPageText(cap = 60_000): string {
   return parts.join('\n\n').replace(/\n{3,}/g, '\n\n').slice(0, cap);
 }
 
-
-//////////////////////////////////////////////////////////////////////////////////////////
+/*************************************************************************************************
+Question snapshots: what changed between two scans
+*************************************************************************************************/
 
 /*
-Field methods:
-- these check if the webpage contains the same fields as the previous scan
-- helps decide whether or not an exsisting task mapping needs updating which would update the interface
+Radios are keyed by their group, so a group is one question
 */
-
-// The question a control answers is its identity when two scans are compared. Controls that answer
-// the same question share one key, so a question's own UI changing never reads as a new question:
-//   - every radio in a group (by name, else its radiogroup/fieldset) — a newly shown option joins it
-//   - a control nested inside another control (a filter box inside a combobox) — joins the outer one
-// Everything else is keyed by its own selector, never by label text: "School" in a second education
-// entry is a second question even though its label matches the first.
 const RADIO_SELECTOR = 'input[type="radio" i], [role="radio"]';
 const RADIO_GROUP_SELECTOR = '[role="radiogroup"], fieldset, [role="group"]';
 
+/*
+A question's key: its radio group, else the outermost control it sits in, else its own selector
+*/
 function fieldKey(element: Element, selector: string): string {
   if (element.matches(RADIO_SELECTOR)) {
     const name = element.getAttribute('name');
@@ -365,16 +504,19 @@ function fieldKey(element: Element, selector: string): string {
   return outer ? stableSelector(outer) : selector;
 }
 
-// `uploadGroup`: for a file input, the upload widget around it (see carryUploadFields).
+/*
+One question and the controls it's made of
+*/
 export type FieldEntry = { visible: boolean; elements: ScannedElement[]; uploadGroup?: Element };
+
 export type FieldSnapshot = Map<string, FieldEntry>;
 
 /*
-Fields that changed between two scans, with four different categories:
-- added: a new field appeared in the DOM
-- revealed: a field that was in the DOM but hidden is now visible (grouped per question)
-- removed: a field that was present in the previous scan is no longer in the DOM
-- hidden: a field that was visible is still in the DOM but now hidden — no longer part of the task
+Questions that changed between two scans:
+- added: new on the page
+- revealed: on the page before but hidden, now shown (grouped per question)
+- removed: gone from the page
+- hidden: still on the page but no longer shown
 */
 export type FieldDiff = {
   added: ScannedElement[];
@@ -383,17 +525,18 @@ export type FieldDiff = {
   hidden: string[];
 };
 
-// The upload widget around a file input: its question group, else a wrapper classed like an upload.
+/*
+The wrapper around a file question, which stays when the upload swaps the input for a file chip
+*/
 export function uploadGroupOf(element: Element): Element | null {
   if (!element.matches('input[type="file" i]')) return null;
   const group = element.closest('[role="group"], fieldset') ?? element.closest('[class*="upload" i]');
   return group && !isPageLevel(group) ? group : null;
 }
 
-// An upload widget swaps its file <input> for a "<filename> ×" chip once a file is chosen — Greenhouse
-// removes the input outright. The question is still on the page, now answered, so that's not a field
-// leaving: carry the input's entry forward while its upload group is on the page, so the input coming
-// back after "Remove file" isn't a new question either. Diff against, and keep, the carried snapshot.
+/*
+Keeps a file question whose input left during an upload while its wrapper is still on the page
+*/
 export function carryUploadFields(before: FieldSnapshot, after: FieldSnapshot): FieldSnapshot {
   const carried: FieldSnapshot = new Map(after);
   for (const [key, entry] of before) {
@@ -402,10 +545,9 @@ export function carryUploadFields(before: FieldSnapshot, after: FieldSnapshot): 
   return carried;
 }
 
-// Structural = a question appeared, came into view, went out of view, or left. A revealed question
-// goes to the backend grouped, so it can tell "already mapped, only its availability changed" from
-// "not mapped, add it". A question going hidden is no longer part of the task, so it's dropped like a
-// removed one — and added back if it's revealed again.
+/*
+The questions added, revealed, removed or hidden between two snapshots
+*/
 export function diffFieldSnapshots(before: FieldSnapshot, after: FieldSnapshot): FieldDiff {
   const diff: FieldDiff = { added: [], revealed: [], removed: [], hidden: [] };
   for (const [key, entry] of after) {
@@ -418,79 +560,4 @@ export function diffFieldSnapshots(before: FieldSnapshot, after: FieldSnapshot):
     if (!after.has(key)) diff.removed.push(...entry.elements.map((element) => element.selector));
   }
   return diff;
-}
-
-// within the valid selectors for a field 
-function containsRealField(element: Element): boolean {
-  return [element, ...element.querySelectorAll(FIELD_NODE_SELECTOR)]
-    .some((field) => field.matches(FIELD_NODE_SELECTOR) && !isInTransientLayer(field));
-}
-
-// checks to see if a new element is a new field or not
-// includes node.removedNodes and node.addedNodes
-function nodeIntroducesField(node: Node): boolean {
-  if (node.nodeType !== Node.ELEMENT_NODE) return false;
-  try {
-    return containsRealField(node as Element);
-  } catch {
-    return false;
-  }
-}
-
-// attribute flips on a control itself that change what the field set is keyed on
-const FIELD_STATE_ATTRS = new Set(['disabled', 'required', 'aria-required', 'id', 'name']);
-const HIDDEN_STYLE_RE = /display\s*:\s*none|visibility\s*:\s*hidden/i;
-const VISIBILITY_CLASS_RE = /hidden|hide|collapse|invisible|d-none|show|open|expand|visible|closed/i;
-
-/*
-Checking if a mutation is due to a field change or not
-- this is used to determine whether or not the interface should be updated or not, the
-  cases that it considers are: hidden, aria-hidden, open, style, class
-    - if any of these attributes are changed, then it will check to see if the visibility has changed or not
-*/
-function visibilityMayHaveChanged(mutation: MutationRecord, element: Element): boolean {
-  switch (mutation.attributeName) {
-    case 'hidden':
-    case 'aria-hidden':
-    case 'open':
-      return true;
-    case 'style':
-      return HIDDEN_STYLE_RE.test(mutation.oldValue || '') !== HIDDEN_STYLE_RE.test(element.getAttribute('style') || '');
-    case 'class': {
-      const before = new Set((mutation.oldValue || '').split(/\s+/).filter(Boolean));
-      const after = new Set((element.getAttribute('class') || '').split(/\s+/).filter(Boolean));
-      const changed = [...before].filter((c) => !after.has(c)).concat([...after].filter((c) => !before.has(c)));
-      return changed.some((c) => VISIBILITY_CLASS_RE.test(c));
-    }
-    default:
-      return false;
-  }
-}
-
-/*
-For each mutation, this checks to see that it not only is a mutation, but that this 
-mutation is also a field change, 
-- True: if it is a field change, then it will return true, which will trigger a interface update, 
-- False: otherwise it will return false and the interface will not be updated
-
-*/
-export function mutationsIncludeFieldChange(mutations: MutationRecord[]): boolean {
-  return mutations.some((m) => {
-    // A document or shadow root (a web component appending straight into its shadow) is a valid
-    // childList target too — only an element target can sit inside a transient layer.
-    const el = m.target.nodeType === Node.ELEMENT_NODE ? m.target as Element : null;
-    try {
-      if (m.type === 'attributes') {
-        if (!el) return false;
-        if (el.matches(FIELD_NODE_SELECTOR) && m.attributeName && FIELD_STATE_ATTRS.has(m.attributeName) && !isInTransientLayer(el)) return true;
-        return visibilityMayHaveChanged(m, el) && containsRealField(el);
-      }
-      // Options filtering in an open listbox, a calendar paging months — whatever came or went
-      // belonged to that transient layer.
-      if (el && isInTransientLayer(el)) return false;
-    } catch {
-      return false;
-    }
-    return [...m.addedNodes, ...m.removedNodes].some(nodeIntroducesField);
-  });
 }

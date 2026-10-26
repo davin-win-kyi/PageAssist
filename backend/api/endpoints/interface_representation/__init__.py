@@ -1,2 +1,4 @@
-"""interface_representation endpoint package."""
+"""
+The interface representation endpoint, with its routes in router.py
+"""
 from api.endpoints.interface_representation.router import router

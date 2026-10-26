@@ -55,13 +55,13 @@ print("\n== 1. health ==")
 r = c.get("/health")
 check("health 200", r.status_code == 200 and r.json() == {"status": "ok"})
 
-print("\n== 2. analyze (model or fallback) ==")
+print("\n== 2. analyze ==")
 r = c.post(f"/task-representations/{SITE}/analyze", json=PAGE)
 check("analyze 200", r.status_code == 200, r.text[:200])
 tr = r.json()
-for key in ("page_purpose", "page_type", "tasks", "components", "modeling_notes"):
+for key in ("page_purpose", "tasks", "components", "modeling_notes"):
     check(f"analyze has {key}", key in tr)
-check("analyze dropped example_difficulties", "example_difficulties" not in tr)
+check("analyze dropped example_difficulties and page_type", "example_difficulties" not in tr and "page_type" not in tr)
 check("tasks is list", isinstance(tr.get("tasks"), list))
 check("components is list", isinstance(tr.get("components"), list))
 from api.state.task import task_store as _ts
@@ -80,8 +80,9 @@ if comps:
           str([c.get("dom_selector") for c in comps if c.get("dom_selector") not in given]))
     check("every visible form field is covered by some component",
           visible_fields <= tracked, str(sorted(visible_fields - tracked)))
-    check("closed enums valid",
-          all(c["semantic_role"] and c["importance"] in ("primary", "supporting", "peripheral") for c in comps))
+    check("components carry no semantic_role / required_for_task / importance",
+          not any(k in c for c in comps for k in ("semantic_role", "required_for_task", "importance")))
+    check("every component has a label", all((c.get("label") or "").strip() for c in comps))
     from definitions.task import ComponentType
     check("every component has a valid component_type",
           all(c.get("component_type") in ComponentType.__args__ for c in comps), str([c.get("component_type") for c in comps]))
@@ -146,18 +147,16 @@ r = c.get(f"/webpage-interfaces/{SITE}")
 check("GET webpage interface 200", r.status_code == 200 and "code" in r.json())
 check("GET webpage interface other site 404", c.get("/webpage-interfaces/nope~x").status_code == 404)
 
-print("\n== 8. widget not persisted, chat log truncates on new chat ==")
+print("\n== 8. widget not persisted, no chat log ==")
 import json as _json
 from api.utils.json_store import DATA_DIR
 _task_file = _json.loads((DATA_DIR / "task_representations.json").read_text())
 check("task_representations.json has no webpage_interface key", "webpage_interface" not in _task_file)
-c.post("/chat", json={"message": "hi", "history": []})  # writes a chat_log line
-c.post("/interface-representation/reset")               # new chat -> should wipe it
-_log = DATA_DIR / "chat_log.jsonl"
-check("chat_log.jsonl empty after /reset", not _log.exists() or _log.read_text().strip() == "")
+c.post("/chat", json={"message": "hi", "history": []})
+check("no chat_log.jsonl is written", not (DATA_DIR / "chat_log.jsonl").exists())
 
 print("\n== 9. enforce_bundled_selectors (model can't be trusted to pick the right single control) ==")
-from api.endpoints.webpage_interface.router import enforce_bundled_selectors
+from api.endpoints.webpage_interface.helpers import enforce_bundled_selectors
 
 _bundle_tr = {"components": [
     {"component_id": "c1", "member_selectors": ["#country", "#phone"]},
@@ -193,6 +192,29 @@ check("a component's own <label> id is not mistaken for a second required contro
 check("description/error/help scaffolding ids are not mistaken for required controls either",
       enforce_bundled_selectors([{"label": "Phone", "selector": "#phone"}], _label_tr)
       == [{"label": "Phone", "selector": "#phone"}])
+
+print("\n== 9b. empty parts are pruned from a chat-built tree ==")
+from api.endpoints.chat.helpers import prune_empty_parts, tree_has_content
+_pruned = prune_empty_parts({"component": "checklist", "description": "A checklist.", "style": {}, "preferences": ["ticks off answers"],
+                             "children": [{}, {"component": "item-row", "preferences": ["one row per question"], "children": [{}]}]})
+check("an empty part is dropped, at every level",
+      _pruned["children"] == [{"component": "item-row", "preferences": ["one row per question"], "children": []}], str(_pruned))
+check("a blank tree whose only part is empty has no content",
+      not tree_has_content(prune_empty_parts({"component": "", "description": "", "style": {}, "preferences": [], "children": [{}]})))
+
+print("\n== 10. no model: the user is told, nothing falls back ==")
+_saved_keys = {k: os.environ.pop(k) for k in ("ANTHROPIC_API_KEY", "GEMINI_API_KEY") if k in os.environ}
+try:
+    r = c.post("/chat", json={"message": "hi", "history": []})
+    check("chat without a model -> 502 with the reason", r.status_code == 502 and "No model is configured" in r.json().get("detail", ""), r.text[:200])
+    r = c.post(f"/task-representations/{SITE}/analyze", json=PAGE)
+    check("analyze without a model -> 502", r.status_code == 502, r.text[:200])
+    r = c.post(f"/webpage-interfaces/{SITE}/generate")
+    w = r.json()
+    check("generate without a model -> the red warning widget, marked degraded",
+          r.status_code == 200 and w.get("degraded") is True and "#d93025" in w.get("code", "") and w["state"]["items"] == [], r.text[:200])
+finally:
+    os.environ.update(_saved_keys)
 
 print("\n== RESULT ==")
 if FAIL:

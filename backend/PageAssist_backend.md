@@ -23,8 +23,9 @@ ANTHROPIC_MODEL_FAST=claude-haiku-4-5   # optional — used by /task-representat
                                         # falls back to ANTHROPIC_MODEL when unset
 ```
 
-Without a key + `ANTHROPIC_MODEL`, every model call returns `None` and the endpoint uses its
-deterministic fallback, so the service still runs end to end.
+PageAssist only works with a model. Without a key + model name, or when a call fails, the route
+returns an error (HTTP 502 with the reason in `detail`) and the panel shows it to the user. There are
+no model-free fallbacks; see "When a model call fails" below.
 
 CORS is open to `http://localhost:5173` (the WXT dev origin).
 
@@ -57,9 +58,9 @@ the change — without the user redoing anything, and without a full re-analysis
 
 | Folder | Purpose |
 |---|---|
-| `api/endpoints/` | The FastAPI routes themselves — one package per domain (`task`, `chat`, `interface_representation`, `webpage_interface`). This is the only layer that knows about HTTP (request/response shapes, status codes). |
+| `api/endpoints/` | The FastAPI routes — one package per domain (`task`, `patch`, `chat`, `interface_representation`, `webpage_interface`). In each, `router.py` holds only the routes and `helpers.py` the logic behind them. This is the only layer that knows about HTTP (request/response shapes, status codes). |
 | `api/state/` | In-process state — plain module-level dicts that get mutated in place, plus the getters/setters around them. This is "what the backend currently believes about the world" (the current page's task representation, the working + saved interface representations, the last-generated widget). Deliberately **not** called `data/` — that name collided with `backend/data/` (the runtime JSON files below), which is a different thing. |
-| `api/utils/` | Shared infrastructure with no domain knowledge: JSON file persistence, the Anthropic client + structured-tool-call helper, append-only debug logs. |
+| `api/utils/` | Shared infrastructure with no domain knowledge: JSON file persistence, and the model clients + structured-tool-call helper. |
 | `definitions/` | The prompt text and Pydantic/JSON-schema definitions for each domain — pure data, no behavior. This is where you go to change what the model is told or what shape it must answer in. |
 | `data/` | Runtime JSON files (git-ignored) — the on-disk form of `api/state/`'s in-memory dicts, so state survives a server restart. **Not** the `api/state/` package — same word, different folder, see above. |
 
@@ -72,7 +73,7 @@ re-exports from its `__init__.py`, so callers write `from api.endpoints import t
 
 ```
 backend/
-  main.py            FastAPI app: mounts the 4 routers, /health
+  main.py            FastAPI app: mounts the 5 routers, turns a ModelError into a 502, /health
   api/
     endpoints/        one package per domain (each __init__ re-exports `router`)
     state/             in-process state (mutated in place, never rebound — see Folders above)
@@ -85,11 +86,18 @@ backend/
 
 | File | Purpose |
 |---|---|
-| `task/router.py` | `POST /task-representations/{id}/analyze`, `/patch`, and the `GET` |
+| `task/router.py` | `POST /task-representations/{id}/analyze` and the `GET` |
+| `task/helpers.py` | the analyze model call |
+| `patch/router.py` | `POST /task-representations/{id}/patch` |
+| `patch/helpers.py` | removing and appending components, the revealed-question rule, the fast patch model call |
 | `chat/router.py` | `POST /chat` |
+| `chat/helpers.py` | the chat model call, `tree_has_content`, `prune_empty_parts` (drops parts with nothing in them before the tree is stored) |
+| `chat/repair.py` | the tree-repair call, run when a chat turn says it changed the tree but returned none |
 | `interface_representation/router.py` | `/interface-representation(s)` — working tree + saved DB CRUD |
-| `webpage_interface/router.py` | generate/GET a widget; the model call, fallback, and selector enforcement all live in this one file |
-| `webpage_interface/fallback_widget.js` | hand-written widget JS, used when the model call fails |
+| `webpage_interface/router.py` | generate/GET a widget |
+| `webpage_interface/helpers.py` | the widget model call, `enforce_bundled_selectors`, `components_to_items`, the failure widget |
+| `webpage_interface/failed_widget.js` | the red warning widget shown in place of the widget when generation fails |
+| `records/router.py` | `POST /records/screenshots`, `/records/errors`, `/records/events`: what the side panel sends to the study records |
 
 **`api/state/`** — plain module-level dicts + the getters/setters around them:
 
@@ -104,21 +112,26 @@ backend/
 | File | Purpose |
 |---|---|
 | `json_store.py` | shared JSON load/dump + points at `backend/data/` |
-| `llm.py` | Anthropic client, streaming create, `call_structured_tool()` |
-| `debuglog.py` | append-only JSONL logs under `backend/data/` (+ `truncate_jsonl`) |
+| `llm.py` | provider switch (Anthropic or Gemini), `create_message()` (→ `anthropic_create_message` / `gemini_create_message`), `call_structured_tool()`, `THINKING_LEVELS`, `ModelError` |
+| `records.py` | the study records: a folder per chat session in `user_study/` at the top of the repo (see Study records below) |
 
 **`definitions/`** — one `prompts.py` + `schema.py` per domain, pure data:
 
 | File | Purpose |
 |---|---|
-| `task/prompts.py` | `TASK_REPRESENTATION_GUIDE` / `PATCH_TASK_REPRESENTATION_GUIDE` — how to read a page (or a few new elements) into tasks, components and relationships |
+| `task/prompts.py` | `TASK_REPRESENTATION_GUIDE` — how to read a page into its tasks hierarchy, the components within it, and their relationships; plus the element, component and requirement blocks the patch prompt shares |
 | `task/schema.py` | the task representation's Pydantic models + tool `input_schema` |
+| `patch/prompts.py` | `PATCH_TASK_REPRESENTATION_GUIDE` — how to model just a few new elements |
+| `patch/schema.py` | `TaskPatchRequest`, `PatchOut`, the `add_components` tool |
 | `chat/prompts.py` | `PAGEASSIST_GUIDE` — how to hold the conversation, when to set `agreed`; ends with the interface representation's rules |
-| `chat/schema.py` | `Chat*` models + the `respond_and_update_interface` tool |
-| `interface_representation/prompts.py` | `INTERFACE_REPRESENTATION_RULES` — the tree's rules, shared by `PAGEASSIST_GUIDE` and the tree-repair call (`INTERFACE_REPRESENTATION_GUIDE`) |
-| `interface_representation/schema.py` | `SaveInterfaceRepresentationRequest` |
+| `chat/schema.py` | `Chat*` models + the `reply_and_update_preferences` tool |
+| `repair/prompts.py` | `INTERFACE_TREE_REPAIR_GUIDE` — the tree-repair call's prompt |
+| `repair/schema.py` | the `build_interface_representation` tool |
+| `interface_representation/prompts.py` | `INTERFACE_REPRESENTATION_RULES` — the tree's rules, shared by `PAGEASSIST_GUIDE` and the tree-repair prompt |
+| `interface_representation/schema.py` | `TREE_SCHEMA` (the tree's JSON schema, used by the chat and repair tools so every part has fields to fill) and `SaveInterfaceRepresentationRequest` |
 | `webpage_interface/prompts.py` | `WEBPAGE_INTERFACE_GUIDE` — how to turn the interface representation + page into a widget |
 | `webpage_interface/schema.py` | the `build_webpage_interface` tool's `input_schema` |
+| `records/schema.py` | the bodies of the records routes: a screenshot, an error, an event |
 
 **`data/`** — runtime JSON (git-ignored), the on-disk form of `api/state/`'s dicts:
 
@@ -126,7 +139,7 @@ backend/
 |---|---|
 | `task_representations.json` | `{site_id, task_representation, page_text}` |
 | `interface_representations.json` | `{active_tree, active_agreed, representations{}}` |
-| `chat_log.jsonl` | one line per `/chat` turn; truncated on a new chat |
+| `records/` | the study records, a folder per chat session (see Study records below) |
 
 Imports: state lives in `api/state/<domain>.py`, mutated in place (never rebound), so
 `from api.state.task import task_store` stays valid after `replace_task_store()`. `chat` and
@@ -142,21 +155,68 @@ that confusion.
 |---|---|
 | `GET /health` | liveness |
 | `POST /task-representations/{site_id}/analyze` | Build this page's **task representation** from its real elements; replaces the single stored slot. Body may include `page_text` (the page's readable prose), stored for widget generation. This is the expensive, full-model call — used on first load of a page and whenever the page has changed enough that a partial patch wouldn't be trustworthy. |
-| `POST /task-representations/{site_id}/patch` | Fast path — splice just-added fields in / drop removed ones (small/fast model + deterministic fallback) instead of re-modelling the whole page. Returns the full updated representation plus `changed: bool` (false when the flagged DOM change turned out cosmetic — nothing was actually added/removed, so the caller shouldn't bother regenerating the widget) and `added_items` (the new components as widget items, which the panel splices into the widget already on the page instead of regenerating it). |
+| `POST /task-representations/{site_id}/patch` | Fast path — splice just-added fields in / drop removed ones (the fast model) instead of re-modelling the whole page. Returns the full updated representation plus `changed: bool` (false when the flagged DOM change turned out cosmetic — nothing was actually added/removed, so the caller shouldn't bother regenerating the widget) and `added_items` (the new components as widget items, which the panel splices into the widget already on the page instead of regenerating it). |
 | `GET /task-representations/{site_id}` | Read the stored task representation (404 if it's for another site). |
 | `GET /interface-representation` | The active **interface representation** (the working preference tree) + its `agreed` flag. |
-| `POST /interface-representation/reset` | Blank the active tree, clear `agreed`, truncate `chat_log.jsonl` — this is what "new chat" / "end chat and start over" calls. |
+| `POST /interface-representation/reset` | Blank the active tree and clear `agreed` — this is what "new chat" / "end chat and start over" calls. |
 | `GET /interface-representations` | List saved, reusable interface-representation entries (`{id, name}`) — the "Saved" tab's data. |
 | `POST /interface-representations` | Save the active tree as a new named entry in that reusable database. |
 | `POST /interface-representations/{id}/activate` | Copy a saved entry into the active tree (this counts as agreement — the widget can be generated from it immediately). |
 | `POST /interface-representations/{id}/update` | Write the current active tree back onto that saved entry (overwrite it with whatever chat has since refined). |
 | `DELETE /interface-representations/{id}` | Remove a saved entry. The working tree is untouched — if it came from this entry, it's just unlinked (no more "update the one I came from" offer). |
 | `POST /chat` | One conversational turn. May reply with text only, or also replace the active interface representation and/or flip `agreed` to true (the model's "this concept is concrete enough to show" signal). |
-| `POST /webpage-interfaces/{site_id}/generate` | Combine the stored task representation + the active interface representation into a **webpage interface** (a concrete, model-generated widget); hold it in memory and return it. This is the call that actually produces the thing that shows up on the page. |
+| `POST /webpage-interfaces/{site_id}/generate?reason=` | Combine the stored task representation + the active interface representation into a **webpage interface** (a concrete, model-generated widget); hold it in memory and return it. This is the call that actually produces the thing that shows up on the page. `reason` (`chat`, `saved` or `page-change`) says why it was built, and the widget comes back with the `record_id` it's filed under in the study records. |
+| `POST /records/screenshots` | A screenshot of an interface, `{record_id, reason, image}` as a PNG or JPEG data URL, filed with it in the records. Refused for an interface that isn't in the current session. |
+| `POST /records/errors` | An error the side panel showed, or one from the widget's code: `{source, where, message}`. |
+| `POST /records/events` | Something else worth keeping, such as how a page change was applied to the interface: `{kind, details}`. |
 | `GET /webpage-interfaces/{site_id}` | Read the in-memory widget (404 after a restart, or for another site — nothing is regenerated automatically). |
 
 `site_id` is an opaque key the client builds from `hostname + pathname + search` (with `/` → `~`) and
 `encodeURIComponent`s into the path. Store the raw value; match on it exactly.
+
+## Study records
+
+For user studies, the backend keeps everything PageAssist makes in `user_study/` at the top of the
+repo, outside `backend/` so it's easy to find. It's never committed, and `PAGEASSIST_RECORDS=off` turns
+it off. A throwaway `PAGEASSIST_DATA_DIR`, as the tests use, takes the records with it, so a test never
+adds to the study. Each chat session gets its own folder, named by when it started. A session starts
+when the side panel opens or the user starts over.
+
+```
+user_study/2026-10-20_14-03-11/
+  summary.json                    counts and timings for the session, updated as it goes
+  conversation.jsonl              one line per chat turn: what the user said, the reply, the quick
+                                  replies, whether they had agreed, and the interface version it made
+  interface_representations/      every version of the interface representation: 001.json, 002.json ...
+                                  each with the chat turn or saved interface it came from
+  task_representations/           every analysis and page-change patch: 001-analyze-<page>.json ...
+  interfaces/001-<page>/          every interface built for a page
+    code.js                       the widget's code
+    widget.json                   its style and items
+    interface_representation.json the interface representation it was built from
+    task_representation.json      the task representation it was built from, so each interface is
+                                  complete even in a session that started over without a new analysis
+    meta.json                     why it was built, how long it took, its items, and the iterations
+                                  that led to it
+    screenshot-applied.png        the widget when it appeared, taken by the side panel
+    screenshot-updated.png        the widget after a page change was spliced into it
+  errors.jsonl                    errors from the backend, the side panel and the widget's code
+  events.jsonl                    interfaces saved, updated or deleted, and how page changes were applied
+```
+
+`summary.json` counts the iterations: `chat_turns`, `turns_to_agreement` (the turn on which the user
+agreed to an interface; 0 when they used a saved one), `interface_representation_versions`,
+`refinements_after_agreement` (changes made after agreeing), and interfaces built by reason. Each
+interface's `meta.json` has the same counts as of when it was built.
+
+What is left out, to keep participants' data out of the records:
+- The page's text and anything typed into the page. Task representations are kept, the page text
+  used to build widgets is not.
+- Page addresses keep no query string, and errors are filed by route rather than by page address.
+- Screenshots are cut down to the widget, so nothing else on the page is kept.
+
+The conversation is kept as written, so it can include what participants say about themselves.
+Cover it in the consent form, and keep the folder somewhere secure.
 
 ## The three representations — what each one is for
 
@@ -211,12 +271,21 @@ All three go through `api/utils/llm.py` → `create_message()`, which uses the *
 (`messages.stream`) — mandatory once `max_tokens` is large (the SDK hard-errors on big non-streaming
 requests). `max_tokens` is 32000 for all three.
 
-On Gemini, every call runs at `thinking_level="medium"` unless it asks for another level
-(`create_message(..., thinking_level=...)` / `call_structured_tool(..., thinking_level=...)`; the
-Anthropic branch ignores it). Only `/patch` asks — for `"low"`. Measured on a real Greenhouse form
-(median of 3): the task representation took 28s / 52s / 293s at low / medium / high and the widget
-20s / 71s / 156s, with the same coverage at medium and high; high's task representation ran past the
-panel's 240s timeout every time.
+On Gemini, each call takes its thinking level from `THINKING_LEVELS` in `llm.py` (the Anthropic
+branch ignores it): `"low"` for chat and `/patch`, `"medium"` for the task representation and the
+widget. A higher level is used only when it costs little extra time, and no step up does. Seconds
+per call over 3 runs (averages; the Greenhouse rows are medians from an earlier measurement):
+
+| Call | low | medium | high |
+|---|---|---|---|
+| chat reply | 2.0 | 3.1 | 6.3 |
+| chat turn that builds the tree | 4.7 | 13.5 | 29.1 |
+| page-change patch | 1.9 | 11.1 | 24.2 |
+| task representation (Greenhouse form) | 28 | 52 | 293 (past the panel's 240s timeout) |
+| widget (Greenhouse form) | 20 | 71 | 156 |
+
+Chat replies are about as fast at medium, but its turns that build the tree take 3 times as long, so
+chat at medium is over twice as slow on average.
 
 `call_structured_tool()` is the shared pattern for the structured calls:
 
@@ -225,10 +294,10 @@ panel's 240s timeout every time.
 2. Validate the tool input against a Pydantic model (raises on a bad enum, missing field, wrong shape).
 3. On a validation failure, feed the **exact error** back as an `is_error` tool_result and let the
    model correct itself (up to 2 retries).
-4. Still invalid after retries → return `None`, and the endpoint uses its deterministic fallback.
+4. No result, a failed call, or still invalid after retries → raise `ModelError`, which `main.py` returns as a 502.
 
 Used by `analyze` (validates against `TaskRepresentationOut`) and `/chat` (`ChatDecision`).
-`webpage-interfaces/generate` uses forced tool-use without the retry loop (its output is executable
+`webpage-interfaces/generate` uses forced tool-use without the retry loop (a failure raises `ModelError` too, and the route answers with the warning widget below) (its output is executable
 code, not a closed schema); its user message is a labelled block (the interface representation, the
 task representation, and — when stored — the page's `page_text`). The guide has the model pick the
 task(s) the interface representation serves and build from their components; a page's own steps are
@@ -260,8 +329,8 @@ all of them.)
 `member_selectors` is "the key nodes in this component" (see `definitions/task/schema.py`), NOT
 "the controls that must each be filled" — it routinely also carries the component's own `<label>`
 (a near-universal `aria-labelledby` pattern gives the label its own id, e.g. `#first_name-label`
-beside `#first_name`) plus description/error/help text nodes. `_looks_control_like()` (used by both
-`enforce_bundled_selectors` and the fallback's `components_to_items`) excludes an id containing
+beside `#first_name`) plus description/error/help text nodes. `looks_control_like()` (used by both
+`enforce_bundled_selectors` and `components_to_items`) excludes an id containing
 `label`/`legend`/`description`/`error`/`hint`/`help`/`message`/`caption` before counting what's left
 as a real control — otherwise a plain single-field component's own label id reads as a second
 "required" control that, being a `<label>`, can never complete, and the item locks incomplete forever
@@ -271,12 +340,11 @@ no matter what the user types. (This is exactly what happened before this exclus
 This is the mechanism behind the adapting-to-changes example under How it works above:
 
 `/task-representations/{id}/patch` uses `get_fast_client_and_model()` (`ANTHROPIC_MODEL_FAST`, else
-`ANTHROPIC_MODEL`; on Gemini, low thinking — ~2–4s, and it added a revealed question correctly every
+`ANTHROPIC_MODEL`; on Gemini, low thinking — about 2s, and it added a revealed question correctly every
 time at every level) with a tiny prompt that returns **only the new component(s)** for a few
-just-appeared elements (told to return an empty list when they aren't task-relevant); the router
+just-appeared elements (told to return an empty list when they aren't task-relevant); the route
 splices them in (and drops components for removed selectors), re-ids to avoid collisions, and links
-them to the primary task. Deterministic fallback: one `field-group` component per new control.
-`_remove_components` reports how many EXISTING components it actually dropped — a UI-only DOM swap
+them to the first top-level task, the page's main one. `remove_components` reports how many EXISTING components it actually dropped — a UI-only DOM swap
 inside an already-modelled question (a file-upload button row replaced by a "&lt;filename&gt; ×"
 chip) almost never matches a real component's selector, so `changed` comes back `false` and the panel
 skips regenerating the widget instead of claiming an update happened for nothing. `revealed` carries
@@ -291,19 +359,26 @@ question then takes seconds instead of a full widget regeneration (~70s at mediu
 ### Task representation specifics
 
 - **Flat lists, linked by id, no count cap.** `tasks` are coarse goals (hierarchy via
-  `parent_task_id`); `components` are semantic groupings; `relationships` link components. `task_type`
-  and `semantic_role` are **free strings** (short kebab-case). Closed `Literal`s: `importance`
-  (primary/supporting/peripheral), `required_for_task` (true/false/unknown), `component_type` (what
-  kind of thing it is, for widget generation: `text-` / `long-text-` / `single-choice-` /
-  `multi-choice-` / `toggle-` / `date-` / `file-question`, `step`, `content`, `heading`, `action`,
-  `navigation`, `status`, `media`) and the relationship `type` (`depends_on`: a follow-up that
+  `parent_task_id`); `components` are semantic groupings; `relationships` link components. There is
+  no page type: a page isn't fixed to one kind. `task_type` is a **free string** (short kebab-case). A
+  component's `label` is what the element does or asks for, in a few words; its `description` is
+  what else the user needs to know, from the page, and is required: for a question, how it's
+  answered (its options, format, limits, help text); for a step, the full instruction; for an action,
+  what using it does; for content, a heading, a status or media, what it says or shows. It's `""`
+  only when the page gives nothing beyond the label. Nothing about the user's task is asserted ahead of time,
+  so there is no `required_for_task` or `importance` (the host reads `required` from the page itself).
+  Closed `Literal`s: `component_type` (what kind of thing it is, for widget generation: `text-` /
+  `long-text-` / `single-choice-` / `multi-choice-` / `toggle-` / `date-` / `file-question`,
+  `other-question` for any other kind of question, `step`, `content`, `heading`, `action`,
+  `navigation`, `status`, `media`, and `other` for anything else) and the relationship `type` (`depends_on`: a follow-up that
   applies only given another answer; `precedes`: the page's own order; `alternative_to`: either one
   satisfies the need). Relationships need visible evidence; ones pointing at a missing component,
   a self-link or a duplicate are dropped on validation, and removing a component drops its links.
 - **The form-question rule** (from the prompt): every individual form question is its **own**
   component — never bundled with adjacent questions — because per-field completion tracking targets
-  components individually. Only genuine sub-parts of one answer combine (first + last name; an
-  address; a date's month + day + year; a phone number's country-code picker + number). When a
+  components individually. Controls combine only when they answer one question together under one
+  label, so that no part answers it alone (a date's month + year under "Start date", a phone number's
+  country-code picker + number under "Phone"). The prompt states the rule without examples. When a
   component's `member_selectors` do bundle more than one control this way, `enforce_bundled_selectors`
   makes that question's widget item `selectors: [...]` (see above) — otherwise the checklist would
   read the whole question done the moment just one part was filled.
@@ -312,11 +387,11 @@ question then takes seconds instead of a full widget regeneration (~70s at mediu
   chip — belongs to that control's component, never a component of its own.
 - **Prompts.** `TASK_REPRESENTATION_GUIDE` (analyze) and `PATCH_TASK_REPRESENTATION_GUIDE` share the
   same element, component, relationship and requirement blocks, so a patched component is shaped
-  exactly like an analyzed one; the analyze guide ends with an example of the output JSON. The patch
+  exactly like an analyzed one; the analyze guide ends with a placeholder skeleton of the output (no
+  real values, so nothing to copy). The patch
   is validated against the same component model (`PatchOut`) and may link a new component to an
   existing one — a revealed follow-up `depends_on` the question that revealed it. If the model returns
-  no components (the new elements aren't task-relevant), nothing is added; the deterministic fallback
-  runs only when the call itself fails.
+  no components (the new elements aren't task-relevant), nothing is added.
 - **Grounding.** Every `dom_selector` / `member_selector` is copied verbatim from an input node;
   prefer `visible` nodes; never assert a value, completion, or "required" without a visible marker.
   Completion is read live by the content script — there are no model-asserted status fields.
@@ -329,13 +404,14 @@ question then takes seconds instead of a full widget regeneration (~70s at mediu
   extra forced re-analyzes when a form-heavy page comes back with suspiciously few components (still
   hydrating).
 
-### Fallbacks (no/failed model call)
+### When a model call fails
 
-- `analyze` → one `form-completion` task plus one `field-group` component per real form control, up
-  to 40 — so a failure still yields a per-field-granular model.
-- `/chat` → a fixed "can't reach the assistant" reply, no tree change.
-- `generate` → a hand-written widget listing one row per component with live checkmarks
-  (`components_to_items`; emits `selectors: [...]` instead of `selector` for a component whose
-  `member_selectors` has more than one control-like entry, same rule as the model path). It carries
-  `degraded: true` and its own "couldn't build the support" note, so the panel tells the user
-  generation failed rather than showing it as a normal result.
+There are no model-free fallbacks: PageAssist only works with a model, and tells the user right away
+when one isn't available.
+
+- `analyze`, `/patch` and `/chat` raise `ModelError`; `main.py` returns it as HTTP 502 with the
+  reason in `detail`, and the panel shows that reason (a chat turn says it couldn't get a reply; an
+  analysis says it couldn't analyze the page).
+- `generate` returns a red warning widget (`failed_widget.js`, `degraded: true`) in place of the
+  widget, with the error and a hint to try again; the panel also says generation failed.
+- The tree-repair call raising, or returning no tree, fails the chat turn the same way.

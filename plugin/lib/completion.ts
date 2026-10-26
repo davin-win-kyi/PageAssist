@@ -1,25 +1,73 @@
-// Get the value of the current element without including whitespaces as an answer
+/*
+Completion contains the logic for the completion of
+elements that are within the page for a specific task
+that the user wants to be able to accomplish
+- only elements whose state changes when they are answered are checked, such as fields,
+  checkboxes, radio buttons, dropdowns and custom widgets
+- buttons and links are actions that don't change when used, so they are never complete
+*/
+
+// Quotes a value for an attribute selector
 export function attrValue(value: string): string {
   return `"${value.replace(/["\\]/g, '\\$&')}"`;
 }
 
+/*************************************************************************************************
+Actions
+*************************************************************************************************/
+
 /*
-Check if something is text fillable element, this includes the following: 
-- input element 
-- textarea element  
-- select element
-- any HTML element where the content is editable 
+Input types that are buttons or hidden data rather than answers
+*/
+const NON_FIELD_INPUT_TYPES = new Set(['hidden', 'submit', 'button', 'reset', 'image']);
+
+/*
+Every element that can hold an answer, used to find the control inside a label or a wrapper
+*/
+export const ANSWERABLE_SELECTOR = [
+  [...NON_FIELD_INPUT_TYPES].reduce((selector, type) => `${selector}:not([type="${type}" i])`, 'input'),
+  'select', 'textarea', '[contenteditable]:not([contenteditable="false"])',
+  '[role="checkbox"]', '[role="radio"]', '[role="switch"]', '[role="combobox"]', '[role="listbox"]',
+  '[role="textbox"]', '[role="searchbox"]', '[role="slider"]', '[role="spinbutton"]',
+].join(', ');
+
+const ACTION_SELECTOR = [
+  'a[href]', 'button', 'summary', '[role="button"]', '[role="link"]', '[role="menuitem"]',
+  ...[...NON_FIELD_INPUT_TYPES].filter((type) => type !== 'hidden').map((type) => `input[type="${type}" i]`),
+].join(', ');
+
+// States that make a button a toggle or a dropdown that shows its choice, rather than an action
+const BUTTON_STATE_SELECTOR = '[aria-checked], [aria-pressed], [aria-selected], [aria-valuenow], [aria-haspopup="listbox"]';
+
+/*
+Whether an element is an action, such as a submit, autofill or apply button, a link, or a tab. These
+don't change when used, so nothing on the page could show them as done.
+*/
+export function isActionElement(element: Element): boolean {
+  if (element.matches?.('[role="tab"]')) return true;
+  if (!element.matches?.(ACTION_SELECTOR) || element.matches(BUTTON_STATE_SELECTOR)) return false;
+  const cls = element.getAttribute('class') || '';
+  if (hasChosenClass(element) || DROPDOWN_CLASS_RE.test(cls)) return false;
+  return !element.querySelector(ANSWERABLE_SELECTOR);
+}
+
+/*************************************************************************************************
+Native fields
+*************************************************************************************************/
+
+/*
+Elements answered by their own value: an input, textarea, select or editable region
 */
 export function isFillableElement(element: Element): boolean {
   const tag = element.tagName.toLowerCase();
-  return tag === 'input' || tag === 'textarea' || tag === 'select' || (element as HTMLElement).isContentEditable;
+  if (tag === 'input') return !NON_FIELD_INPUT_TYPES.has((element.getAttribute('type') || 'text').toLowerCase());
+  return tag === 'textarea' || tag === 'select' || (element as HTMLElement).isContentEditable;
 }
 
-// typescript function call to check if something is checked or not
 const isChecked = (element: Element): boolean => element.matches(':checked');
 
 /*
-basically returns the grouping for a given radio selection grouping or checkbox grouping
+The radio or checkbox group an input belongs to, by name or by its enclosing group
 */
 function choiceGroup(input: HTMLInputElement, type: 'radio' | 'checkbox'): Element[] {
   const name = input.getAttribute('name');
@@ -32,10 +80,7 @@ function choiceGroup(input: HTMLInputElement, type: 'radio' | 'checkbox'): Eleme
 }
 
 /*
-This is to basically to check to see if a dropdown has a selected element
-- check to see if the value is not disabled 
-- if there is a value attribute
-- and if the option with no spaces is greater than 0, to make sure it is a valid option
+A dropdown is answered when a chosen option is enabled and not blank
 */
 function selectHasAnswer(select: HTMLSelectElement): boolean {
   return [...select.querySelectorAll('option:checked')].some((option) => {
@@ -46,67 +91,57 @@ function selectHasAnswer(select: HTMLSelectElement): boolean {
 }
 
 /*
-Make sure if an element is filled with the following conditions: 
-- radio: make sure that something is checked
-- checkbox: make sure that something is checked
-- file: make sure that the given file is not empty
-- make sure that text of the element is not empty 
-- dropdown: check to make sure the option chosen is valid
-- area element: check that it is not empty 
-- editable elements: check that is has content within it 
+Whether a field holds an answer: a checked option in its group, a chosen file, a valid dropdown
+option, or non-blank text
 */
 export function isElementFilled(element: Element): boolean {
   if (element instanceof HTMLInputElement) {
     const type = (element.type || 'text').toLowerCase();
-
-    // answering an ordinary radio group: any one of its options checked (never all of them)
+    if (NON_FIELD_INPUT_TYPES.has(type)) return false;
     if (type === 'radio') return choiceGroup(element, 'radio').some(isChecked);
-
-    // checking a checkbox answers it (in a same-name group, checking any one of them does)
     if (type === 'checkbox') return choiceGroup(element, 'checkbox').some(isChecked);
-
-    // choosing a file answers it
     if (type === 'file') return (element.files?.length ?? 0) > 0;
-
-    // entering non-empty text answers it — a field left with just spaces does not
     return element.value.trim().length > 0;
   }
-
-  // choosing a non-empty option from a dropdown answers it
   if (element instanceof HTMLSelectElement) return selectHasAnswer(element);
-
-  // if the area element is filled in or not (just spaces does not count)
   if (element instanceof HTMLTextAreaElement) return element.value.trim().length > 0;
-
-  // if editable, is this elemenet filled in or not
   if ((element as HTMLElement).isContentEditable) return (element.textContent || '').trim().length > 0;
+  if (isValueWidget(element)) return (element.getAttribute('aria-valuenow') || '').trim().length > 0;
   return false;
 }
 
+/*************************************************************************************************
+Fields that always hold a value (defaults)
+*************************************************************************************************/
 
-// make sure that what is filled in is different from the given default value
+/*
+Fields that start with a value, like dates, numbers, sliders and dropdowns, so having one isn't an
+answer on its own. Custom sliders and spin buttons are read through aria-valuenow.
+*/
 export const DEFAULT_PRONE_INPUT_TYPES = new Set(['date', 'datetime-local', 'month', 'week', 'time', 'number', 'range', 'color']);
+const VALUE_WIDGET_SELECTOR = '[role="slider"], [role="spinbutton"]';
+const isValueWidget = (element: Element): boolean =>
+  !isFillableElement(element) && !!element.matches?.(VALUE_WIDGET_SELECTOR);
+
 export function isDefaultProneField(element: Element): boolean {
   if (element instanceof HTMLSelectElement) return true;
   if (element instanceof HTMLInputElement) return DEFAULT_PRONE_INPUT_TYPES.has((element.type || 'text').toLowerCase());
-  return false;
+  return isValueWidget(element);
 }
 
-/*
-This is to get the field values of a given element
-*/
 export function fieldValue(element: Element): string {
   if (element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement || element instanceof HTMLSelectElement) {
     return element.value;
   }
-  return '';
+  return isValueWidget(element) ? element.getAttribute('aria-valuenow') || '' : '';
 }
 
-const DEFAULT_PRONE_SELECTOR = ['select', ...[...DEFAULT_PRONE_INPUT_TYPES].map((type) => `input[type="${type}" i]`)].join(', ');
+const DEFAULT_PRONE_SELECTOR = [
+  'select', VALUE_WIDGET_SELECTOR, ...[...DEFAULT_PRONE_INPUT_TYPES].map((type) => `input[type="${type}" i]`),
+].join(', ');
 
 /*
-This is used in order to get the initial default values for all of the elements 
-- this is used in order to make sure that the updates are different from the user given values
+Records each default-prone field's starting value, so a later value can be compared against it
 */
 export function recordInitialValues(root: ParentNode, initialValues: WeakMap<Element, string>): void {
   const fields = [...(root.querySelectorAll?.(DEFAULT_PRONE_SELECTOR) ?? [])];
@@ -116,19 +151,15 @@ export function recordInitialValues(root: ParentNode, initialValues: WeakMap<Ele
   }
 }
 
-
-// Fields the user has visited (focused, then moved on from). Leaving a real default in a field you
-// visited is choosing it as your answer.
+/*
+Fields the user focused and then left. Leaving a default in a visited field is choosing it.
+*/
 export type VisitedFields = { has(element: Element): boolean };
 const NONE_VISITED: VisitedFields = { has: () => false };
 
 /*
-This is used to check whether a user has completed an item with the following condiitons: 
-- the element is filled
-- for default prone elements, either:
-  - its value is different from the baseline (the user changed it), or
-  - the user visited it and left the default, which is itself a real answer (an untouched default
-    is not — the user may not have seen it yet)
+A filled field is answered, except a default-prone one still on its starting value that the user
+never visited
 */
 function isFieldAnswered(element: Element, baseline: string | undefined, visited: VisitedFields): boolean {
   if (!isElementFilled(element)) return false;
@@ -136,17 +167,24 @@ function isFieldAnswered(element: Element, baseline: string | undefined, visited
   return fieldValue(element) !== baseline || visited.has(element);
 }
 
+/*************************************************************************************************
+Custom widgets
+*************************************************************************************************/
+
 /*
-check for the answering of elements that include: 
-- radio buttons, checkboxes, toggle buttons, option lists and custom select components
+States that mark a custom radio, checkbox, toggle or option as chosen. A checkbox in the "mixed"
+state has some of its options chosen.
 */
 export const SELECTED_CHOICE_SELECTOR = [
   'input:checked',
-  '[aria-checked="true"]', '[aria-pressed="true"]', '[aria-selected="true"]',
+  '[aria-checked="true"]', '[aria-checked="mixed"]', '[aria-pressed="true"]', '[aria-selected="true"]',
   '[data-checked="true"]', '[data-selected="true"]', '[data-active="true"]',
   '[data-state="checked"]', '[data-state="active"]', '[data-state="on"]', '[data-state="selected"]',
 ].join(', ');
 
+/*
+Pieces a custom dropdown only shows once something is chosen, like a value chip or a clear button
+*/
 export const HAS_VALUE_SELECTOR = [
   '[class*="singleValue" i]', '[class*="single-value" i]',
   '[class*="multiValue" i]', '[class*="multi-value" i]',
@@ -154,10 +192,9 @@ export const HAS_VALUE_SELECTOR = [
   'button[aria-label*="clear" i]', 'button[aria-label*="remove" i]',
 ].join(', ');
 
-
 /*
-Completion through class names: 
-- Considers the cases where the class name can indicate whether an element is completed or not
+A class name saying the element is chosen, like "is-selected" or "optionChecked", but not a
+negated one like "unselected" or "not-checked"
 */
 const CHOSEN_WORDS = new Set(['selected', 'checked', 'chosen', 'pressed']);
 const NEGATIONS = new Set(['un', 'not', 'non', 'no', 'de']);
@@ -169,9 +206,11 @@ function hasChosenClass(element: Element): boolean {
 }
 
 /*
-Checks to see if for the following elements that a chosen class has been chosen
+Whether an option-like element, such as a button, list item, label or ARIA option, is the chosen
+one. A selected tab is navigation, not an answer.
 */
 export function isChosenOption(element: Element): boolean {
+  if (element.matches?.('[role="tab"]')) return false;
   if (element.matches?.(SELECTED_CHOICE_SELECTOR)) return true;
   const tag = element.tagName.toLowerCase();
   const role = element.getAttribute('role');
@@ -180,10 +219,9 @@ export function isChosenOption(element: Element): boolean {
   return optionish && hasChosenClass(element);
 }
 
-// Placeholder values for HTML Elements
+// Placeholder text a dropdown shows before anything is chosen
 export const PLACEHOLDER_RE = /^(select|choose|pick|search|enter|type to|start typing|please (select|choose|pick|enter|specify))\b|^(-{2,}|—|\.{3}|…)|^(none|nothing|no \w+) selected\b/i;
 
-// For dropdown cases that can occur 
 const DROPDOWN_CLASS_RE = /(^|[\s_-])(select|multiselect|dropdown|combobox)([\s_-]|$)/i;
 const AUTOCOMPLETE_CLASS_RE = /(^|[\s_-])autocomplete([\s_-]|$)/i;
 const isDropdownControl = (el: Element): boolean =>
@@ -191,30 +229,48 @@ const isDropdownControl = (el: Element): boolean =>
 const isSelectWidget = (el: Element): boolean =>
   isDropdownControl(el) || !!el.matches?.('[role="listbox"]') || AUTOCOMPLETE_CLASS_RE.test(el.getAttribute('class') || '');
 
-
 /*
-Check that a dropdown, selector or combobox does not have its default value
+A custom dropdown shows a chosen value: text that isn't a label, a rendered placeholder or
+placeholder wording
 */
 export function comboboxHasValue(root: Element): boolean {
   const control = [root, ...(root.querySelectorAll?.('*') ?? [])].find(isDropdownControl);
   if (!control) return false;
   if (control.querySelector('label, legend, h1, h2, h3, h4, [class*="label" i]')) return false;
-  // a rendered placeholder element (react-select's `__placeholder`, Ashby's `_placeholder_`) means
-  // nothing is chosen, whatever its text says
   if (control.querySelector('[class*="placeholder" i]')) return false;
   const text = (control.textContent || '').replace(/\s+/g, ' ').trim()
     .replace(/[×✕✖⌄▾▼▾⌄˅]\s*$/g, '').trim();
   return text.length > 0 && !PLACEHOLDER_RE.test(text);
 }
 
-// Where there are input types that do not require text input
-const NON_ANSWER_INPUT_TYPES = new Set(['radio', 'checkbox', 'hidden', 'submit', 'button', 'reset', 'image']);
+/*
+A listbox is answered once one of its options is selected or checked
+*/
+function listboxHasSelection(listbox: Element): boolean {
+  return !!listbox.querySelector('[role="option"][aria-selected="true"], [role="option"][aria-checked="true"]');
+}
+
+/*
+A custom textbox (role textbox or searchbox, not a native field) is answered by its text, unless
+that text is its own placeholder
+*/
+const CUSTOM_TEXTBOX_SELECTOR = '[role="textbox"], [role="searchbox"]';
+function customTextboxHasText(element: Element): boolean {
+  const text = (element.textContent || '').replace(/\s+/g, ' ').trim();
+  const placeholder = (element.getAttribute('aria-placeholder') || element.getAttribute('data-placeholder') || '').trim();
+  return text.length > 0 && text !== placeholder;
+}
+
+/*************************************************************************************************
+Containers around a question
+*************************************************************************************************/
+
+const NON_ANSWER_INPUT_TYPES = new Set(['radio', 'checkbox', ...NON_FIELD_INPUT_TYPES]);
 const isHelperInput = (el: Element): boolean => !!el.matches?.('input[aria-hidden="true"], input[tabindex="-1"]');
 
 /*
-Dealing with ComboBoxes: 
-- checks to see that if the element within a combo box that is meant to be filled is filled, and if it is
-  filled it makes sure to see that the element is actually filled with the proper class name 
+The text box inside a custom dropdown, used to filter its options. Its text is a search, not the
+answer.
 */
 function isComboboxSearchInput(el: Element): boolean {
   if (el.tagName !== 'INPUT' || !['text', 'search'].includes(((el as HTMLInputElement).type || 'text').toLowerCase())) return false;
@@ -226,8 +282,7 @@ function isComboboxSearchInput(el: Element): boolean {
 }
 
 /*
-Some elements can have multiple possible fields, but only one of them is the main answer field which can be used 
-- this function finds this main answer field and returns it to the user or return null if none is found
+The field in a container that holds its answer, skipping helper and search inputs
 */
 export function primaryAnswerField(container: Element): Element | null {
   for (const el of container.querySelectorAll?.('input, textarea, select, [contenteditable]:not([contenteditable="false"])') ?? []) {
@@ -238,38 +293,39 @@ export function primaryAnswerField(container: Element): Element | null {
   return null;
 }
 
-// This method is a function variable which can be used to do a basic check of whether or not 
-// an input type if a file or not 
 const isFileInput = (el: Element): boolean => el.tagName === 'INPUT' && (el as HTMLInputElement).type?.toLowerCase() === 'file';
 
-/*
-This is used to check whether or not something is a radio type or not
-*/
 const CHOICE_SELECTOR = 'input[type="radio" i], input[type="checkbox" i], [role="radio"], [role="checkbox"], [role="switch"]';
 
 /*
-Checks to see if a container based element looks complete in other words elements that include: 
-- primary answer fields, comboboxes
+Whether a container around a question looks answered:
+- a chosen option among its choices
+- else its answer field is filled, or an uploaded file's remove button is shown
+- else a custom dropdown or a standalone listbox shows a value
+- else one of its option buttons is chosen
 */
 export function containerLooksComplete(element: Element): boolean {
   const choices = [...(element.querySelectorAll?.(CHOICE_SELECTOR) ?? [])];
   if (choices.length > 0) return choices.some(isChosenOption);
 
-  // This is a check for elements that are a file 
   const primary = primaryAnswerField(element);
   if (primary) {
     if (isElementFilled(primary)) return true;
-    // a chosen file still counts after the widget resets its <input>: the attached file's remove button
     return isFileInput(primary) && !!element.querySelector?.(HAS_VALUE_SELECTOR);
   }
 
-  // this is to check if a combobox is filled in or not
   if (element.querySelector?.(HAS_VALUE_SELECTOR) || comboboxHasValue(element)) return true;
+  // a standalone listbox, not the option list of a dropdown (which may pre-select its placeholder)
+  const listbox = element.matches?.('[role="listbox"]') ? element : element.querySelector?.('[role="listbox"]');
+  const inDropdown = [element, ...(element.querySelectorAll?.('*') ?? [])].some(isDropdownControl);
+  if (listbox && !inDropdown && listboxHasSelection(listbox)) return true;
   return [...(element.querySelectorAll?.('button, [role="button"], li, label') ?? [])]
     .some((option) => !option.closest('[role="listbox"], [role="menu"]') && isChosenOption(option));
 }
 
-// tries to see which of the parent elements that the element is associated with 
+/*
+The nearest custom dropdown or choice group around an element, within a few levels
+*/
 export function enclosingChoiceWidget(element: Element): Element | null {
   let node: Element | null = element.parentElement;
   let widget: Element | null = null;
@@ -286,57 +342,90 @@ export function enclosingChoiceWidget(element: Element): Element | null {
   return widget;
 }
 
+/*************************************************************************************************
+Labels: judged by the question they name
+*************************************************************************************************/
+
 /*
-So it checks if something is associated with something for a choice: 
-- and this is mostly for radio button based elements 
-- checkboxes
-- as well as for toggles as well
+The question an element names, for an element that holds no answer itself:
+- a <label> names its `for` control, or the control inside it
+- an element whose id a control or group points at with aria-labelledby
+- a <legend> names its fieldset, and a table row's header names its row
 */
-function hasChoiceState(element: Element): boolean {
-  return element.matches(CHOICE_SELECTOR) || element.hasAttribute('aria-checked') || element.hasAttribute('aria-pressed')
-    || !!element.querySelector(CHOICE_SELECTOR);
+function labelledQuestion(element: Element): Element | null {
+  const tag = element.tagName.toLowerCase();
+  if (tag === 'label') {
+    const id = element.getAttribute('for');
+    const control = (id ? element.ownerDocument.getElementById(id) : null) ?? element.querySelector(ANSWERABLE_SELECTOR);
+    if (control) return control;
+  }
+  const ownId = (element as HTMLElement).id;
+  const named = ownId ? element.ownerDocument.querySelector(`[aria-labelledby~=${attrValue(ownId)}]`) : null;
+  if (named && named !== element) return named;
+  const parent = element.parentElement;
+  if (tag === 'legend' && parent?.tagName.toLowerCase() === 'fieldset') return parent;
+  if (tag === 'th' && parent?.tagName.toLowerCase() === 'tr' && parent.querySelector(ANSWERABLE_SELECTOR)) return parent;
+  return null;
 }
 
-const EMPTY_SET: ReadonlySet<string> = new Set();
+/*
+The element that actually holds the answer for an element: the question a label-like element
+names, else the element itself
+*/
+export function answeringElement(element: Element): Element {
+  if (element.matches(ANSWERABLE_SELECTOR) || element.querySelector(ANSWERABLE_SELECTOR)) return element;
+  return labelledQuestion(element) ?? element;
+}
 
-// check if checklist item is complete
+/*************************************************************************************************
+Item completion
+*************************************************************************************************/
+
+/*
+Whether the element a checklist item tracks is answered. An action is never complete. A search or
+helper input inside a custom dropdown is judged by the dropdown, and a label by what it names.
+*/
 export function isElementComplete(
   element: Element,
   selector: string,
   baselines?: Map<string, string>,
-  interacted: ReadonlySet<string> = EMPTY_SET,
   visited: VisitedFields = NONE_VISITED,
 ): boolean {
+  if (isActionElement(element)) return false;
+  const answering = answeringElement(element);
+  if (answering !== element && !isActionElement(answering)) return elementHoldsAnswer(answering, selector, baselines, visited);
+  return elementHoldsAnswer(element, selector, baselines, visited);
+}
+
+function elementHoldsAnswer(element: Element, selector: string, baselines: Map<string, string> | undefined, visited: VisitedFields): boolean {
   if (isFillableElement(element)) {
-    // a react-select / custom combobox search box only holds filter text — the answer is the value the
-    // widget shows. A free-text autocomplete (no enclosing widget) answers by its own text.
     if (isComboboxSearchInput(element) || isHelperInput(element)) {
       const widget = enclosingChoiceWidget(element);
       if (widget) return containerLooksComplete(widget);
     }
-    // every other field answers by its own value alone
     return isFieldAnswered(element, baselines?.get(selector), visited);
   }
+  if (isValueWidget(element)) return isFieldAnswered(element, baselines?.get(selector), visited);
+  if (element.matches?.(CUSTOM_TEXTBOX_SELECTOR)) return customTextboxHasText(element);
+
   if (isChosenOption(element) || containerLooksComplete(element)) return true;
   const widget = enclosingChoiceWidget(element);
-  if (widget && widget !== element && containerLooksComplete(widget)) return true;
-  // a plain button/link counts once clicked — but not a checkbox/switch/toggle, since clicking it on
-  // and off again still leaves it unchecked
-  return !hasChoiceState(element) && interacted.has(selector);
+  return !!widget && widget !== element && containerLooksComplete(widget);
 }
 
-// method to check if an item is complete, and checks if all of the
-// things encompasing the item is completed or not
+/*
+An item is complete once every element it tracks is answered, such as both the country code and
+the number of a phone question
+*/
 export function isItemComplete(
   selectors: string[],
   resolve: (selector: string) => Element | null,
   baselines?: Map<string, string>,
-  interacted: ReadonlySet<string> = EMPTY_SET,
   visited: VisitedFields = NONE_VISITED,
 ): boolean {
   if (selectors.length === 0) return false;
   return selectors.every((selector) => {
     const element = resolve(selector);
-    return !!element && isElementComplete(element, selector, baselines, interacted, visited);
+    return !!element && isElementComplete(element, selector, baselines, visited);
   });
 }

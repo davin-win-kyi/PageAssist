@@ -1,13 +1,16 @@
 <!doctype html>
+<!--
+The page the widget's sandboxed iframe loads, which runs main.ts
+-->
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
     <title>PageAssist widget sandbox</title>
     <style>
-      /* No height:100% here on purpose — the host measures document.body.scrollHeight to auto-size the
-         iframe to the widget's actual content, which only works if body's height reflects its content's
-         natural size rather than stretching to fill whatever height the iframe currently happens to have
-         (that would just report the iframe's own current size back, self-reinforcing). */
+      /*
+      Note: size and more are not defined in order to allow the widget
+      to automatically resize to the content size which will be in the iframe. 
+      */
       html, body { margin: 0; padding: 0; }
       body { font: 13px -apple-system, BlinkMacSystemFont, sans-serif; }
     </style>

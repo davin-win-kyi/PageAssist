@@ -1,19 +1,34 @@
-// Selector / role / accessible-name computation, shared by content.ts (page scan, click tracking,
-// widget-item grounding). One implementation so every caller agrees on how an element is named.
+/*
+This file is used by content.ts and page-scan.ts to agree on a common
+convention on how to name the elements through selectors, and on their roles and names
+*/
 import { attrValue } from './completion.ts';
 
 export { attrValue };
 
-// Used everywhere a real element needs a selector: gathering page elements, tracking clicks, grounding
-// a widget item. Identity-based, never positional (no nth-child), so it keeps naming the same element
-// when siblings are added or removed around it. A data-tw-ref stamp outranks the natural attributes:
-// stableSelector only stamps an element that has a natural selector when that selector is shared with
-// an earlier element, and once stamped the element must keep its identity.
+/*************************************************************************************************
+Selectors
+*************************************************************************************************/
+
+/*
+The selector stableSelector chose for each element, so the element reports the same one later,
+even after it leaves the page
+*/
+const chosenSelectors = new WeakMap<Element, string>();
+
+/*
+Makes an address of the element
+- uses the selector already chosen for it, a data-tw-ref stamp, its id, a data-testid,
+  its name, or its aria-label
+- not checked for uniqueness; stableSelector is the one handed to the model
+*/
 export function computeSelector(element: Element): string {
-  const el = element as HTMLElement;
-  if (el.id) return `#${CSS.escape(el.id)}`;
+  const chosen = chosenSelectors.get(element);
+  if (chosen) return chosen;
   const ref = element.getAttribute('data-tw-ref');
   if (ref) return `[data-tw-ref=${attrValue(ref)}]`;
+  const el = element as HTMLElement;
+  if (el.id) return `#${CSS.escape(el.id)}`;
   const testId = element.getAttribute('data-testid');
   if (testId) return `[data-testid=${attrValue(testId)}]`;
   const name = element.getAttribute('name');
@@ -23,38 +38,134 @@ export function computeSelector(element: Element): string {
   return element.tagName.toLowerCase();
 }
 
-// Does `selector` resolve to THIS element (the first match in its document / shadow root)? False when
-// the selector can't be parsed — e.g. an aria-label containing a newline.
-function resolvesTo(element: Element, selector: string): boolean {
+/*
+The roots a selector is looked up in. content.ts searches the page's own document before any
+shadow root or iframe, so a selector for an element inside one must not match in the document.
+*/
+function lookupRoots(element: Element): { own: ParentNode; before: ParentNode[] } {
+  const own = (element.getRootNode?.() ?? element.ownerDocument) as ParentNode;
+  const top = globalThis.document as Document | undefined;
+  return { own, before: top && own !== top ? [top] : [] };
+}
+
+// Whether the selector matches this element and nothing else that content.ts could find first
+function isUnique(element: Element, selector: string): boolean {
   try {
-    const root = (element.getRootNode?.() ?? element.ownerDocument) as ParentNode;
-    return root.querySelector(selector) === element;
+    const { own, before } = lookupRoots(element);
+    const matches = own.querySelectorAll(selector);
+    return matches.length === 1 && matches[0] === element && before.every((root) => !root.querySelector(selector));
   } catch {
     return false;
   }
 }
 
-// The selector to hand to the model / store on a widget item — it must resolve back to this element.
-// A testid / name / aria-label selector is kept only while this element is its first match: a second
-// education entry reusing name="school", or a row of "Remove" buttons, would otherwise all ground on
-// the first one. Otherwise — or when there's nothing natural at all (Ashby's div.select_container,
-// SnorkelAI's toggle wrappers) — stamp a data-tw-ref and reference that.
-let twRefCounter = 0;
-export function stableSelector(element: Element): string {
-  const current = computeSelector(element);
-  if (current.startsWith('#') || current.startsWith('[data-tw-ref=')) return current;
-  if (current !== element.tagName.toLowerCase() && resolvesTo(element, current)) return current;
+// Whether content.ts would find this element first with the selector
+function resolvesFirst(element: Element, selector: string): boolean {
   try {
-    const ref = `tw-${twRefCounter++}`;
-    element.setAttribute('data-tw-ref', ref); // observer ignores data-tw-ref attribute mutations
-    return `[data-tw-ref=${attrValue(ref)}]`;
+    const { own, before } = lookupRoots(element);
+    return own.querySelector(selector) === element && before.every((root) => !root.querySelector(selector));
   } catch {
-    return current;
+    return false;
   }
 }
 
-// ARIA role: explicit role= if present, else the implicit role for the tag / input type. Empty string
-// when there's no meaningful role.
+/*
+Attributes that identify an element on their own, in the order they're tried
+*/
+const IDENTIFYING_ATTRS = ['data-testid', 'data-test', 'data-qa', 'data-cy', 'name', 'aria-label', 'placeholder', 'for', 'href'];
+
+/*
+Attributes added to narrow a match, such as a radio's value among options sharing one name.
+`value` only narrows choices and buttons, since a text field's value attribute can change as the
+user types.
+*/
+const NARROWING_ATTRS = ['type', 'value', 'role', 'name', 'aria-label', 'data-testid'];
+const FIXED_VALUE_SELECTOR = 'input[type="radio" i], input[type="checkbox" i], option, button, input[type="submit" i], input[type="button" i]';
+
+/*
+Selectors to try, from simplest to most specific: the id, one identifying attribute, then that
+attribute with narrowing ones added one at a time
+*/
+function candidateSelectors(element: Element): string[] {
+  const tag = element.tagName.toLowerCase();
+  const fixedValue = element.matches(FIXED_VALUE_SELECTOR);
+  const attr = (name: string) => {
+    const value = element.getAttribute(name);
+    return value && (name !== 'value' || fixedValue) ? `[${name}=${attrValue(value)}]` : '';
+  };
+  const out: string[] = [];
+  if ((element as HTMLElement).id) out.push(`#${CSS.escape((element as HTMLElement).id)}`);
+  for (const name of IDENTIFYING_ATTRS) {
+    const base = attr(name);
+    if (!base) continue;
+    let combined = `${tag}${base}`;
+    out.push(combined);
+    for (const extra of NARROWING_ATTRS) {
+      const more = extra === name ? '' : attr(extra);
+      if (!more) continue;
+      combined += more;
+      out.push(combined);
+    }
+  }
+  return out;
+}
+
+/*
+The closest ancestor that a selector of its own picks out uniquely, to scope a descendant selector
+*/
+function uniqueAncestorSelector(element: Element): string | null {
+  for (let node = element.parentElement, depth = 0; node && depth < 8; node = node.parentElement, depth += 1) {
+    if (node.matches('html, body')) return null;
+    const own = candidateSelectors(node).find((selector) => isUnique(node!, selector));
+    if (own) return own;
+  }
+  return null;
+}
+
+/*
+The selector to hand to the model, always unique to the element:
+1. one it was already given (an earlier choice or a data-tw-ref stamp)
+2. its id or attributes, alone or combined
+3. those, or its tag, scoped under the closest uniquely identified ancestor
+4. otherwise a new data-tw-ref stamp
+*/
+let twRefCounter = 0;
+export function stableSelector(element: Element): string {
+  // once chosen, a selector stays while it still finds this element first, so the element keeps
+  // its identity when a look-alike is added after it
+  const chosen = chosenSelectors.get(element);
+  if (chosen && resolvesFirst(element, chosen)) return chosen;
+  const ref = element.getAttribute('data-tw-ref');
+  if (ref) return `[data-tw-ref=${attrValue(ref)}]`;
+
+  const candidates = candidateSelectors(element);
+  let selector = candidates.find((candidate) => isUnique(element, candidate));
+  if (!selector) {
+    const scope = uniqueAncestorSelector(element);
+    const scoped = [...candidates, element.tagName.toLowerCase()].map((candidate) => `${scope} ${candidate}`);
+    selector = scope ? scoped.find((candidate) => isUnique(element, candidate)) : undefined;
+  }
+  if (selector) {
+    chosenSelectors.set(element, selector);
+    return selector;
+  }
+  try {
+    const stamp = `tw-${twRefCounter++}`;
+    // the observer ignores data-tw-ref attribute mutations
+    element.setAttribute('data-tw-ref', stamp);
+    return `[data-tw-ref=${attrValue(stamp)}]`;
+  } catch {
+    return computeSelector(element);
+  }
+}
+
+/*************************************************************************************************
+Roles and accessible names
+*************************************************************************************************/
+
+/*
+Get the role of an element
+*/
 const INPUT_TYPE_ROLE: Record<string, string> = {
   checkbox: 'checkbox', radio: 'radio', range: 'slider', number: 'spinbutton', search: 'searchbox',
   email: 'textbox', tel: 'textbox', url: 'textbox', text: 'textbox', password: 'textbox',
@@ -73,6 +184,9 @@ export function computeRole(element: Element): string {
   return '';
 }
 
+/*
+Helpers used by compute Accessible Name and computer Accessible Description
+*/
 const idrefs = (element: Element, attribute: string): string[] =>
   (element.getAttribute(attribute) || '').split(/\s+/).filter(Boolean);
 
@@ -88,9 +202,9 @@ function textOfIds(element: Element, ids: string[]): string {
 const NAME_FROM_CONTENT = 'a, button, h1, h2, h3, h4, h5, h6, [role="link"], [role="button"], [role="heading"]';
 const BUTTON_INPUT_TYPES = new Set(['submit', 'button', 'reset']);
 
-// Accessible name, in the order a screen reader resolves it: aria-labelledby → aria-label → alt → a
-// link/button/heading's own text → associated <label> → placeholder → title. Returned in full — any
-// length limit is the caller's call, never made during extraction. Empty when nothing names the element.
+/*
+Get the accessible name of an element
+*/
 export function computeAccessibleName(element: Element): string {
   const labelledBy = textOfIds(element, idrefs(element, 'aria-labelledby'));
   if (labelledBy) return labelledBy;
@@ -98,7 +212,8 @@ export function computeAccessibleName(element: Element): string {
   const label = clean(element.getAttribute('aria-label'));
   if (label) return label;
 
-  const alt = clean(element.getAttribute('alt')); // <img>, <area>, <input type="image">
+  // <img>, <area> and <input type="image">
+  const alt = clean(element.getAttribute('alt'));
   if (alt) return alt;
 
   if (element.matches(NAME_FROM_CONTENT)) {
@@ -107,7 +222,8 @@ export function computeAccessibleName(element: Element): string {
     if (content) return content;
   }
   if (element.tagName.toLowerCase() === 'input' && BUTTON_INPUT_TYPES.has((element.getAttribute('type') || '').toLowerCase())) {
-    const value = clean(element.getAttribute('value')); // <input type="submit" value="Apply">
+    // a submit or button input is named by its value
+    const value = clean(element.getAttribute('value'));
     if (value) return value;
   }
 
@@ -124,9 +240,9 @@ export function computeAccessibleName(element: Element): string {
   return clean(element.getAttribute('title'));
 }
 
-// Accessible description — the help text, hint, or validation message wired to the element:
-// aria-describedby, plus aria-errormessage while aria-invalid="true", else a title that isn't already
-// serving as the name. Returned in full; empty when nothing describes it.
+/*
+Give the accessible description for an element
+*/
 export function computeAccessibleDescription(element: Element): string {
   const ids = idrefs(element, 'aria-describedby');
   if (element.getAttribute('aria-invalid') === 'true') ids.push(...idrefs(element, 'aria-errormessage'));

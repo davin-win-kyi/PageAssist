@@ -9,7 +9,7 @@ for (const k of ['window', 'document', 'Element', 'Node', 'HTMLElement', 'HTMLIn
   (globalThis as Record<string, unknown>)[k] = (dom as Record<string, unknown>)[k];
 }
 
-const { isElementComplete, enclosingChoiceWidget, isItemComplete, recordInitialValues } = await import('../../plugin/lib/completion.ts');
+const { isElementComplete, enclosingChoiceWidget, isItemComplete, recordInitialValues, isActionElement, answeringElement } = await import('../../plugin/lib/completion.ts');
 
 let pass = 0;
 let fail = 0;
@@ -183,17 +183,17 @@ console.log('\n== 5b. a visited field\'s kept default is an answer ==');
   const visitedOnly = (element: Element) => ({ has: (e: Element) => e === element });
   const date = frag('<input id="start" type="date" value="2026-10-08" />').querySelector('#start')!;
   check('a pre-filled date the user visited and left as-is -> complete',
-    isElementComplete(date, '#start', baselines, undefined, visitedOnly(date)), true);
+    isElementComplete(date, '#start', baselines, visitedOnly(date)), true);
   check('  the same date never visited -> incomplete', isElementComplete(date, '#start', baselines), false);
   const pri = frag('<select id="pri"><option value="low">Low</option><option value="mid" selected>Mid</option></select>').querySelector('#pri')!;
   check('a defaulted <select> the user visited and kept -> complete',
-    isElementComplete(pri, '#pri', baselines, undefined, visitedOnly(pri)), true);
+    isElementComplete(pri, '#pri', baselines, visitedOnly(pri)), true);
   const placeholder = frag('<select id="size"><option value="" selected>Select…</option><option value="m">M</option></select>').querySelector('#size')!;
   check('a visited <select> left on its blank "Select…" placeholder -> incomplete (not an answer)',
-    isElementComplete(placeholder, '#size', baselines, undefined, visitedOnly(placeholder)), false);
+    isElementComplete(placeholder, '#size', baselines, visitedOnly(placeholder)), false);
   const other = frag('<input id="start" type="date" value="2026-10-08" />').querySelector('#start')!;
   check('visiting a DIFFERENT field doesn\'t confirm this one\'s default',
-    isElementComplete(other, '#start', baselines, undefined, visitedOnly(date)), false);
+    isElementComplete(other, '#start', baselines, visitedOnly(date)), false);
 }
 
 // ---------------------------------------------------------------------------------------------------
@@ -229,14 +229,14 @@ console.log('\n== 6. a wrapper\'s own answer decides; all-unchosen is never comp
   check('  one option classed "is-selected" -> complete', isElementComplete(toggle('is-selected', 'unselected'), '#relocate'), true);
 
   const remote = (state: string) => frag(`<div id="remote" role="checkbox" aria-checked="${state}">Open to remote work</div>`).querySelector('#remote')!;
-  check('a custom checkbox clicked on and off again (still aria-checked=false) -> incomplete',
-    isElementComplete(remote('false'), '#remote', undefined, new Set(['#remote'])), false);
-  check('  the same checkbox left checked -> complete', isElementComplete(remote('true'), '#remote', undefined, new Set(['#remote'])), true);
+  check('a custom checkbox clicked on and off again (still aria-checked=false) -> incomplete', isElementComplete(remote('false'), '#remote'), false);
+  check('  the same checkbox left checked -> complete', isElementComplete(remote('true'), '#remote'), true);
   const pressed = frag('<button id="ft" aria-pressed="false">Full-time only</button>').querySelector('#ft')!;
-  check('a toggle button pressed and released (aria-pressed=false) -> incomplete',
-    isElementComplete(pressed, '#ft', undefined, new Set(['#ft'])), false);
+  check('a toggle button pressed and released (aria-pressed=false) -> incomplete', isElementComplete(pressed, '#ft'), false);
   const autofill = frag('<button id="autofill">Autofill with resume</button>').querySelector('#autofill')!;
-  check('  while a plain button still counts once clicked', isElementComplete(autofill, '#autofill', undefined, new Set(['#autofill'])), true);
+  check('  a plain button is an action, never complete', isElementComplete(autofill, '#autofill'), false);
+  const apply = frag('<a id="apply" href="/apply">Apply now</a>').querySelector('#apply')!;
+  check('  a link is an action, never complete', isElementComplete(apply, '#apply'), false);
 
   const twoConsents = frag(`<div role="group">
     <label><input type="checkbox" id="terms" name="terms" /> I accept the terms</label>
@@ -345,6 +345,75 @@ console.log('\n== 9. first-seen values, not apply-time values, are the baseline 
   const revealed = frag('<div class="field"><input id="end-year" type="number" value="" /></div>').querySelector('.field')!;
   recordInitialValues(revealed, initial);                   // a field revealed later, as it appears
   check('a field that appears later is recorded when it appears', initial.has(revealed.querySelector('#end-year')!), true);
+}
+
+// ---------------------------------------------------------------------------------------------------
+// 10. Other answerable elements: custom sliders and spin buttons, custom textboxes, listboxes, labels.
+// ---------------------------------------------------------------------------------------------------
+console.log('\n== 10. custom sliders, textboxes, listboxes and labels ==');
+{
+  const slider = (now: string) => frag(`<div id="years" role="slider" aria-valuemin="0" aria-valuemax="20" aria-valuenow="${now}"></div>`).querySelector('#years')!;
+  const sliderBase = new Map([['#years', '0']]);
+  check('a custom slider still on its starting value -> incomplete', isElementComplete(slider('0'), '#years', sliderBase), false);
+  check('  moved off it -> complete', isElementComplete(slider('5'), '#years', sliderBase), true);
+  const kept = slider('0');
+  check('  its starting value kept after a visit -> complete', isElementComplete(kept, '#years', sliderBase, { has: (e) => e === kept }), true);
+  const spin = frag('<div id="qty" role="spinbutton" aria-valuenow=""></div>').querySelector('#qty')!;
+  check('a custom spin button with no value -> incomplete', isElementComplete(spin, '#qty'), false);
+  const recorded = new WeakMap<Element, string>();
+  const sliderRoot = frag('<div><div id="pct" role="slider" aria-valuenow="50"></div></div>');
+  recordInitialValues(sliderRoot, recorded);
+  check('a custom slider\'s starting value is recorded', recorded.get(sliderRoot.querySelector('#pct')!), '50');
+
+  const box = (text: string) => frag(`<div id="bio" role="textbox" aria-placeholder="Tell us about yourself">${text}</div>`).querySelector('#bio')!;
+  check('an empty custom textbox -> incomplete', isElementComplete(box(''), '#bio'), false);
+  check('  showing only its placeholder -> incomplete', isElementComplete(box('Tell us about yourself'), '#bio'), false);
+  check('  with text typed -> complete', isElementComplete(box('I build things'), '#bio'), true);
+
+  const list = (selected: string) => frag(`<div id="langs" role="listbox" aria-multiselectable="true">
+    <div role="option" aria-selected="${selected}">Python</div><div role="option" aria-selected="false">Go</div></div>`).querySelector('#langs')!;
+  check('a listbox with nothing selected -> incomplete', isElementComplete(list('false'), '#langs'), false);
+  check('  with an option selected -> complete', isElementComplete(list('true'), '#langs'), true);
+
+  const labelled = (value: string) => frag(`<div><label id="lbl" for="city">City</label><input id="city" value="${value}" /></div>`).querySelector('#lbl')!;
+  check('a label whose field is empty -> incomplete', isElementComplete(labelled(''), '#lbl'), false);
+  check('  whose field is filled -> complete', isElementComplete(labelled('Seattle'), '#lbl'), true);
+}
+
+// ---------------------------------------------------------------------------------------------------
+// 11. Actions are never checked, and labels are judged by the question they name.
+// ---------------------------------------------------------------------------------------------------
+console.log('\n== 11. actions, and what labels name ==');
+{
+  const submit = frag('<input id="go" type="submit" value="Submit application" />').querySelector('#go')!;
+  check('a submit input is an action, never complete (its value is not an answer)', [isActionElement(submit), isElementComplete(submit, '#go')].join(), 'true,false');
+  const autofill = frag('<button id="af">Autofill with resume</button>').querySelector('#af')!;
+  check('an autofill button is an action', isActionElement(autofill), true);
+  const toggle = frag('<button id="t" aria-pressed="false">Remote only</button>').querySelector('#t')!;
+  check('a toggle button is not an action, even while unpressed', isActionElement(toggle), false);
+  const trigger = frag('<button id="d" aria-haspopup="listbox">Seattle</button>').querySelector('#d')!;
+  check('a dropdown button showing its choice is not an action, and reads complete', [isActionElement(trigger), isElementComplete(trigger, '#d')].join(), 'false,true');
+  const tab = frag('<div role="tablist"><button id="up" role="tab" aria-selected="true">Upload</button></div>').querySelector('#up')!;
+  check('a selected tab is navigation, never an answer', isElementComplete(tab, '#up'), false);
+  const mixed = frag('<div id="all" role="checkbox" aria-checked="mixed">All locations</div>').querySelector('#all')!;
+  check('a checkbox in the mixed state has some options chosen -> complete', isElementComplete(mixed, '#all'), true);
+
+  const named = (value: string) => frag(`<div><div id="fn-label">First Name</div>
+    <input id="first_name" aria-labelledby="fn-label" value="${value}" /></div>`).querySelector('#fn-label')!;
+  check('an aria-labelledby label is judged by the field that names it: empty -> incomplete', isElementComplete(named(''), '#fn-label'), false);
+  check('  filled -> complete', isElementComplete(named('Ada'), '#fn-label'), true);
+  const legend = (checked: string) => frag(`<fieldset><legend id="lg">Work authorization</legend>
+    <label><input type="radio" name="auth" ${checked} /> Yes</label><label><input type="radio" name="auth" /> No</label></fieldset>`).querySelector('#lg')!;
+  check('a legend is judged by its fieldset: nothing chosen -> incomplete', isElementComplete(legend(''), '#lg'), false);
+  check('  an option chosen -> complete', isElementComplete(legend('checked'), '#lg'), true);
+  const row = (checked: string) => frag(`<table><tbody><tr><th id="q1">I enjoy teamwork</th>
+    <td><input type="radio" name="q1" ${checked} /></td><td><input type="radio" name="q1" /></td></tr></tbody></table>`).querySelector('#q1')!;
+  check('a matrix row header is judged by its row: unanswered -> incomplete', isElementComplete(row(''), '#q1'), false);
+  check('  answered -> complete', isElementComplete(row('checked'), '#q1'), true);
+  const page = frag('<div><label id="l" for="d">Start date</label><input id="d" type="date" value="2026-10-08" /></div>');
+  check('a label resolves to the field it names, for baselines', answeringElement(page.querySelector('#l')!), page.querySelector('#d'));
+  const roleLabel = frag('<label id="rl">Open to relocation <span role="switch" aria-checked="true"></span></label>').querySelector('#rl')!;
+  check('a label holding a custom switch is judged by it', isElementComplete(roleLabel, '#rl'), true);
 }
 
 console.log(`\n== RESULT ==\n  ${pass} passed, ${fail} failed`);

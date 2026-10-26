@@ -1,28 +1,21 @@
 /*
- * content.ts — the page-side agent. Injected into every tab; the only code in the extension with
- * direct access to the real page's DOM. Four jobs:
- *
- *   1. Read the page      — scanPage() (lib/page-scan.ts) walks the DOM and returns the elements and
- *                            context containers the backend analyzes. Exposed to the panel via the
- *                            GET_PAGE_ELEMENTS message and the pageassist:inspect window event.
- *   2. Watch for change    — a MutationObserver reports when a question enters, leaves, or comes
- *                            into view (never a dropdown opening, a calendar, or a value being typed)
- *                            — the only kind of change that should make the panel patch/re-analyze
- *                            the task representation. See handlePageChange() below.
- *   3. Host the widget     — creates a sandboxed <iframe> (entrypoints/sandbox/) and feeds it the
- *                            model-generated widget's code + state. Draws no chrome of its own.
- *   4. Keep the widget live — re-reads each tracked field's real filled/checked state (and whether the
- *                            page marks it required) on every keystroke/click and pushes the refresh
- *                            into the sandbox — no network or model call involved. A page change that
- *                            only adds/removes questions is spliced into the widget the same way.
- *                            See pushLiveState()/liveifyState()/updateWidgetItems().
- *
- * A widget is MODEL-GENERATED CODE, not a declarative tree the host interprets: it runs inside the
- * sandboxed iframe, which has an opaque origin and is structurally unable to touch this real page's
- * DOM, cookies, storage, or network (see the frame-setup comment near ensureInterfaceFrame() below).
- * "style" (frame position/size) and "state" (what the widget is shown, including which real elements
- * it should track) stay host-owned data; "code" is everything else the model wrote.
- */
+The following file does the following:
+
+1. Read the page - walks the DOM and gets the elements (page-scan.ts)
+2. Watches for changes with a MutationObserver (mutations.ts)
+3. Creates the sandboxed <iframe> and feeds it the model-generated widget code (interface-frame.ts)
+4. keeping the widget in sync with the page, without the model once the widget is built
+
+Note: the widget is model generated code and is not a declarative tree the host interprets
+and runs within the sandboxed iframe and cannot touch the actual webpage
+*/
+
+import { isDefaultProneField, fieldValue, recordInitialValues, isItemComplete, isActionElement, answeringElement } from '../lib/completion';
+import { scanPage, getPageText, countFrames, uploadGroupOf, type FieldSnapshot } from '../lib/page-scan';
+import { changedOutsideInterface, mutationsIncludeFieldChange, buildPageChangeEvent, observeTree } from '../lib/mutations';
+import { itemSelectors, nonAnswerMembers, isItemRequired, spliceWidgetItems, type WidgetItem } from '../lib/widget-items';
+import { createInterfaceFrame } from '../lib/interface-frame';
+
 type WidgetState = { items?: WidgetItem[]; [key: string]: unknown };
 type Widget = {
   style?: Record<string, unknown>;
@@ -30,66 +23,22 @@ type Widget = {
   state?: WidgetState;
 };
 
-import {
-  isFillableElement,
-  isDefaultProneField,
-  fieldValue,
-  recordInitialValues,
-  isElementComplete,
-  isItemComplete,
-} from '../lib/completion';
-import { computeSelector } from '../lib/selectors';
-import { applyStyle } from '../lib/frame-style';
-import {
-  scanPage,
-  getPageText,
-  countFrames,
-  diffFieldSnapshots,
-  carryUploadFields,
-  uploadGroupOf,
-  containersReferencedBy,
-  mutationsIncludeFieldChange,
-  type FieldSnapshot,
-} from '../lib/page-scan';
-import { describeMutation } from '../lib/mutations';
-import { itemSelectors, nonAnswerMembers, isItemRequired, spliceWidgetItems, type WidgetItem } from '../lib/widget-items';
-import { startFrameDrag, type FrameDrag } from '../lib/frame-drag';
+/*************************************************************************************************
+Finding tracked elements
+*************************************************************************************************/
 
-/* Completion detection (isElementComplete + its helpers) lives in ../lib/completion.ts so it can be
- * unit-tested against real markup. This file keeps only the stateful click registry that feeds it. */
-function isClickTrackedElement(element: Element): boolean {
-  const tag = element.tagName.toLowerCase();
-  if (tag === 'button' || tag === 'a') return true;
-  const role = element.getAttribute('role');
-  return role === 'button' || role === 'link' || role === 'checkbox' || role === 'switch' || role === 'menuitem';
-}
-
-/* Selectors of elements the user has clicked/activated at least once this page-view — the only signal
- * available for whether a button/link-style checklist item ("Apply", "Autofill", a dropdown option)
- * has been done, since those have no inherent "value" the way a form field does. */
-const interactedSelectors = new Set<string>();
-document.addEventListener('click', (event) => {
-  const clickable = (event.target as Element | null)?.closest('button, a, [role="button"], [role="link"], [role="checkbox"], [role="switch"], [role="menuitem"]');
-  if (clickable) interactedSelectors.add(computeSelector(clickable));
-}, true);
-
-/* Default-prone fields (a <select>, a date) the user has visited — focused, then moved on from. A
- * real default left in place there is the user's answer; an untouched default isn't (see
- * isFieldAnswered in lib/completion.ts). */
+/*
+Fields the user has visited (focused, then left), so a default they kept counts as their answer
+*/
 const visitedFields = new WeakSet<Element>();
 document.addEventListener('focusout', (event) => {
   const field = event.target as Element | null;
   if (field instanceof Element && isDefaultProneField(field)) visitedFields.add(field);
 }, true);
 
-function isTrackableElement(element: Element): boolean {
-  return isFillableElement(element) || isClickTrackedElement(element);
-}
-
-/* A plain selector string (e.g. "#name") can't cross a shadow-DOM or iframe boundary via
- * document.querySelector — this tries the direct lookup, then recurses through shadow roots and
- * same-origin iframes, matching what collectElementsDeep gathered, so widget items grounded in
- * those elements still resolve for live completion tracking. */
+/*
+Doesn't just do a selector search, but also checks the shadow DOM and same-origin iframes as well
+*/
 function deepQuerySelector(selector: string, root: Document | ShadowRoot = document): Element | null {
   const direct = root.querySelector(selector);
   if (direct) return direct;
@@ -110,17 +59,16 @@ function deepQuerySelector(selector: string, root: Document | ShadowRoot = docum
   return null;
 }
 
-/* A selector that can't be resolved (or isn't valid CSS) reads as "not on the page". */
+// A selector that can't be resolved, or isn't valid CSS, reads as "not on the page"
 function resolveSelector(selector: string): Element | null {
   try { return deepQuerySelector(selector); } catch { return null; }
 }
 
-/* Settled when a widget is applied (or items are spliced in), while every tracked control is on the page:
- * - uploadGroups: each file input's upload widget. Once a file is chosen the widget may swap the input
- *   for a "<filename> ×" chip (Greenhouse removes it outright); the item then reads its answer from
- *   the group (containerLooksComplete sees the file's remove button).
- * - nonAnswer: members of a multi-control item that aren't answerable controls (Greenhouse's
- *   "Accepted file types" line in the resume question), which could never be filled. */
+/*
+Two cases dealt with
+1. when uploading a file removes its input, the question's wrapper stands in for it
+2. a line of text bundled into an item, which can never be filled out, is left out
+*/
 const uploadGroups = new Map<string, Element>();
 const nonAnswer = new Set<string>();
 function settleItems(items: WidgetItem[]) {
@@ -142,15 +90,13 @@ function resolveTracked(selector: string): Element | null {
   return group?.isConnected ? group : null;
 }
 
-/* Re-reads live DOM state for every item in a widget's state and returns it with its "complete" and
- * "required" flags refreshed — read straight from the real page, never from anything the model said,
- * so this is always accurate and needs no model involvement to stay so. Any other keys the model put
- * in state (a title, a section, custom fields) pass through untouched. */
+/*
+Re-reads the complete and required states of each grounded item from the page. An item on
+actions only, like a submit button, is left as it is: nothing on the page shows it as done.
+*/
 function liveifyState(state: WidgetState | undefined, baselines?: Map<string, string>): WidgetState | undefined {
   if (!state || !Array.isArray(state.items)) return state;
   const items = state.items.map((item) => {
-    /* Manual items (a recipe step, a section) have no DOM done-state — the widget owns their
-     * `complete` (and `required`); the host never touches them. */
     if (!item || item.manual === true) return item;
     const selectors = itemSelectors(item);
     if (selectors.length === 0) return item;
@@ -159,51 +105,52 @@ function liveifyState(state: WidgetState | undefined, baselines?: Map<string, st
       if (!resolved.has(selector)) resolved.set(selector, resolveTracked(selector));
       return resolved.get(selector) ?? null;
     };
-    if (!selectors.some((selector) => resolve(selector))) return { ...item, complete: item.complete ?? false };
+    const found = selectors.map(resolve).filter((element): element is Element => !!element);
+    if (found.length === 0) return { ...item, complete: item.complete ?? false };
+    if (found.every(isActionElement)) return item;
     const answering = selectors.filter((selector) => !nonAnswer.has(selector));
     return {
       ...item,
-      complete: isItemComplete(answering.length > 0 ? answering : selectors, resolve, baselines, interactedSelectors, visitedFields),
+      complete: isItemComplete(answering.length > 0 ? answering : selectors, resolve, baselines, visitedFields),
       required: isItemRequired(selectors, resolve) || item.required === true,
     };
   });
   return { ...state, items };
 }
 
-/* ===================================================================================================
- * Entry point — see the file header above for the four jobs this content script does.
- * =================================================================================================== */
+// Sends to the side panel. It rejects when no panel is listening, which is expected.
+function sendToPanel(message: Record<string, unknown>) {
+  globalThis.chrome?.runtime?.sendMessage({ source: 'pageassist-plugin', ...message })?.catch(() => {});
+}
+
+/*************************************************************************************************
+The 4 tasks mentioned above
+*************************************************************************************************/
 
 export default defineContentScript({
   matches: ['<all_urls>'],
   runAt: 'document_idle',
   main() {
+    /*
+    The script can be injected into an already open tab, so a stamp keeps it from running twice
+    */
     const root = document.documentElement;
-    /* The panel force-injects this script into tabs that were already open when the extension loaded
-     * (Chrome only auto-injects declared content scripts into pages that load AFTER install/reload).
-     * Guard against running twice — the manifest injection and a programmatic one can both land. */
     if (root.dataset.pageassistPlugin === 'connected') return;
     root.dataset.pageassistPlugin = 'connected';
 
+    const frames = createInterfaceFrame(document);
     let applyingInterface = false;
     let contextInvalidated = false;
-    /* The widget's drag in progress, if any (lib/frame-drag.ts). */
-    let frameDrag: FrameDrag | null = null;
 
+    // The extension was reloaded while this page was open, so stop everything
     function teardownOnInvalidatedContext() {
       if (contextInvalidated) return;
       contextInvalidated = true;
       window.clearTimeout(mutationTimer);
       stopLiveStatePoll();
       observer.disconnect();
-      document.removeEventListener('input', pushLiveState, true);
-      document.removeEventListener('change', pushLiveState, true);
-      document.removeEventListener('click', pushLiveState, true);
-      document.removeEventListener('focusout', pushLiveState, true);
+      for (const type of ['input', 'change', 'click', 'focusout']) document.removeEventListener(type, pushLiveState, true);
     }
-
-    /* scanPage / diffFieldSnapshots / countFrames + the recursive scan live in ../lib/page-scan.ts
-     * (pure DOM reads, so they can be unit-tested and reused). */
 
     window.addEventListener('pageassist:inspect', () => {
       const { elements, containers } = scanPage();
@@ -216,8 +163,22 @@ export default defineContentScript({
       window.postMessage({ source: 'pageassist-plugin', type: 'INTERFACE_APPLIED', widget }, '*');
     });
 
+    /*******************************************************************************************
+    Applying the widget
+    *******************************************************************************************/
+
+    let interfaceReady = false;
+    let interfaceReadyResolvers: Array<() => void> = [];
+    let currentWidgetState: WidgetState | null = null;
+
+    /*
+    Starting values of default-prone fields, and the baseline each tracked item is compared to
+    */
+    const initialValues = new WeakMap<Element, string>();
+    const fieldBaselines = new Map<string, string>();
+
     function removeWebpageInterface() {
-      frameDrag?.end();
+      frames.endDrag();
       document.querySelectorAll('[data-pageassist-interface]').forEach((element) => element.remove());
       interfaceReady = false;
       currentWidgetState = null;
@@ -227,32 +188,6 @@ export default defineContentScript({
       stopLiveStatePoll();
     }
 
-    /* No host-drawn chrome. The widget authors every affordance (title bar, drag handle,
-     * close/collapse buttons) itself, inside the sandbox, and asks the host to act via
-     * window.pageassist.* — see the 'move' / 'close' / 'setHeight' messages handled below and the API
-     * in entrypoints/sandbox/main.ts. Set true once the widget has moved the frame, so later content
-     * updates don't snap it back to the default corner. */
-    let userPositionedFrame = false;
-
-    /* The widget's own document is a real navigation to an extension-origin sandbox page (see
-     * entrypoints/sandbox/), not srcdoc — srcdoc would inherit this host page's CSP, which on strict
-     * sites can silently block the sandbox's own script with zero error signal; a real navigation
-     * gets its own independent CSP instead. sandbox="allow-scripts" with no allow-same-origin gives
-     * it an opaque origin: it structurally cannot reach this page's DOM, cookies, storage, or
-     * navigate the top frame — that's what actually isolates model-generated code from the real
-     * page, not anything in the message-passing below. */
-    let interfaceReady = false;
-    let interfaceReadyResolvers: Array<() => void> = [];
-    let currentWidgetState: WidgetState | null = null;
-    /* Each default-prone field's value from when it first appeared on the page (recordInitialValues),
-     * kept for the page's lifetime — never re-read at apply time, when it may already be the user's
-     * own answer. fieldBaselines maps the current widget's selectors onto these. */
-    const initialValues = new WeakMap<Element, string>();
-    const fieldBaselines = new Map<string, string>();
-
-    /* Resolves true when the sandbox reports ready, false if it doesn't within the timeout (a page
-     * CSP blocked the sandbox script, the extension URL failed to resolve, etc.) — so
-     * applyWebpageInterface can report failure instead of hanging. */
     function waitForInterfaceReady(timeoutMs = 8000): Promise<boolean> {
       if (interfaceReady) return Promise.resolve(true);
       return new Promise((resolve) => {
@@ -261,135 +196,56 @@ export default defineContentScript({
       });
     }
 
-    /* Tell the side panel whether the widget actually made it onto the page, so its "Applying…"
-     * indicator can track reality instead of a fixed timer. */
+    // Tells the side panel whether the widget actually made it onto the page
     function reportApplyOutcome(ok: boolean) {
-      try {
-        globalThis.chrome?.runtime?.sendMessage({ source: 'pageassist-plugin', type: 'WEBPAGE_INTERFACE_APPLIED', ok })?.catch(() => {});
-      } catch (_) { /* extension context gone */ }
-    }
-
-    /* Auto-fit the frame height to the sandbox's reported content height, unless the widget has
-     * pinned an explicit height via window.pageassist.setHeight(). */
-    function applySandboxResize(frame: HTMLIFrameElement, height: number) {
-      if (frame.dataset.pageassistExplicitHeight === 'true') return;
-      const capped = Math.min(Math.max(Math.round(height) + 8, 40), window.innerHeight * 0.7);
-      frame.style.height = `${capped}px`;
-    }
-
-    /* Nudge the frame by a pixel delta the widget streams during its own drag gesture. First call
-     * converts the corner-docked frame to left/top so deltas accumulate. */
-    function moveFrame(frame: HTMLIFrameElement, dx: number, dy: number) {
-      const rect = frame.getBoundingClientRect();
-      if (!userPositionedFrame) {
-        frame.style.left = `${rect.left}px`;
-        frame.style.top = `${rect.top}px`;
-        frame.style.right = '';
-        frame.style.bottom = '';
-        userPositionedFrame = true;
-      }
-      frame.style.left = `${rect.left + dx}px`;
-      frame.style.top = `${rect.top + dy}px`;
+      try { sendToPanel({ type: 'WEBPAGE_INTERFACE_APPLIED', ok }); } catch { /* invalidated context */ }
     }
 
     /*
-     * Authenticates by event.source (the exact Window that sent it) rather than event.origin — an
-     * opaque origin has no origin string worth checking, it reports as "null". Message protocol from
-     * the sandbox:
-     *   - sandbox-ready      : listener is live, safe to post 'init'
-     *   - resize {height}    : content height changed -> auto-fit the frame
-     *   - dragStart {screenX, screenY} / dragMove {screenX, screenY} / dragEnd
-     *                        : widget drag handle -> the host moves the frame with the pointer
-     *   - move {dx, dy}      : widget-authored nudge of the frame
-     *   - setHeight {height} : widget pins the frame height
-     *   - resetHeight        : widget releases the pin (back to auto-fit)
-     *   - close              : widget-authored dismiss -> tear the widget down
-     *   - error {message}    : widget code threw
-     */
+    Messages from the sandbox: frame requests go to interface-frame.ts, the rest are handled here
+    */
     window.addEventListener('message', (event) => {
-      const frame = document.querySelector('iframe[data-pageassist-interface]') as HTMLIFrameElement | null;
+      const frame = frames.current();
       if (!frame || event.source !== frame.contentWindow) return;
-      const data = event.data as { source?: string; type?: string; height?: number; dx?: number; dy?: number; screenX?: number; screenY?: number; message?: string } | null;
+      const data = event.data as { source?: string; type?: string; message?: string } | null;
       if (!data || data.source !== 'pageassist-sandbox') return;
-      if (data.type === 'dragStart' && typeof data.screenX === 'number' && typeof data.screenY === 'number') {
-        frameDrag?.end();
-        frameDrag = startFrameDrag(document, data.screenX, data.screenY, (dx, dy) => moveFrame(frame, dx, dy), () => { frameDrag = null; });
-        return;
-      }
-      if (data.type === 'dragMove' && typeof data.screenX === 'number' && typeof data.screenY === 'number') {
-        frameDrag?.to(data.screenX, data.screenY);
-        return;
-      }
-      if (data.type === 'dragEnd') {
-        frameDrag?.end();
-        return;
-      }
+      if (frames.handleMessage(frame, data)) return;
       if (data.type === 'sandbox-ready') {
         interfaceReady = true;
         const resolvers = interfaceReadyResolvers;
         interfaceReadyResolvers = [];
         resolvers.forEach((resolve) => resolve());
-      } else if (data.type === 'resize' && typeof data.height === 'number') {
-        applySandboxResize(frame, data.height);
-      } else if (data.type === 'move' && typeof data.dx === 'number' && typeof data.dy === 'number') {
-        moveFrame(frame, data.dx, data.dy);
-      } else if (data.type === 'setHeight' && typeof data.height === 'number') {
-        frame.dataset.pageassistExplicitHeight = 'true';
-        frame.style.height = `${Math.max(0, Math.round(data.height))}px`;
-      } else if (data.type === 'resetHeight') {
-        frame.dataset.pageassistExplicitHeight = 'false';
       } else if (data.type === 'close') {
         removeWebpageInterface();
       } else if (data.type === 'error') {
         console.error('PageAssist: widget code errored:', data.message);
+        // the panel keeps it in the study records
+        try { sendToPanel({ type: 'WIDGET_ERROR', message: String(data.message ?? '') }); } catch { /* invalidated context */ }
       }
     });
 
-    function ensureInterfaceFrame(): HTMLIFrameElement {
-      const existing = document.querySelector('iframe[data-pageassist-interface]') as HTMLIFrameElement | null;
-      if (existing) return existing;
-
-      userPositionedFrame = false;
-      interfaceReady = false;
-      const frame = document.createElement('iframe');
-      frame.setAttribute('data-pageassist-interface', 'true');
-      frame.setAttribute('title', 'PageAssist interface support');
-      frame.setAttribute('sandbox', 'allow-scripts');
-      Object.assign(frame.style, {
-        position: 'fixed', zIndex: '2147483646', border: '0', background: 'transparent',
-        colorScheme: 'light',
-      });
-      const sandboxUrl = globalThis.chrome?.runtime?.getURL?.('sandbox.html');
-      if (sandboxUrl) {
-        frame.src = sandboxUrl;
-      } else {
-        console.error('PageAssist: could not resolve the widget sandbox page URL');
-      }
-      document.body.appendChild(frame);
-      return frame;
+    /*
+    Applies one widget at a time, in the order they arrive
+    */
+    let applyQueue: Promise<void> = Promise.resolve();
+    function applyWebpageInterface(widget: Widget | null | undefined): Promise<void> {
+      applyQueue = applyQueue.then(() => applyNow(widget)).catch((error) => console.error('PageAssist: applying the widget failed', error));
+      return applyQueue;
     }
 
-    async function applyWebpageInterface(widget: Widget | null | undefined) {
+    async function applyNow(widget: Widget | null | undefined) {
       if (!widget) { removeWebpageInterface(); reportApplyOutcome(true); return; }
       applyingInterface = true;
 
-      const frame = ensureInterfaceFrame();
+      // a new frame, or a fresh sandbox in the current one, so no earlier widget is left running
+      let frame = frames.current();
+      interfaceReady = false;
+      if (frame) frames.reload(frame);
+      else frame = frames.create();
       const ready = await waitForInterfaceReady();
-      if (!document.body.contains(frame)) { applyingInterface = false; reportApplyOutcome(false); return; } /* dismissed while waiting */
-      if (!ready) { applyingInterface = false; reportApplyOutcome(false); return; } /* sandbox never came up */
+      if (!document.body.contains(frame) || !ready) { applyingInterface = false; reportApplyOutcome(false); return; }
 
-      const style = widget.style || {};
-      applyStyle(frame, style);
-      frame.dataset.pageassistExplicitHeight = style.height ? 'true' : 'false';
-      /* Once the user has dragged the widget, leave its position alone on later content updates
-       * rather than snapping it back to the default corner — dragging should stick until the widget
-       * itself is torn down (a genuinely new task/site) and recreated. */
-      if (!userPositionedFrame) {
-        if (!style.top && !style.bottom) frame.style.bottom = frame.style.bottom || '20px';
-        if (!style.left && !style.right) frame.style.right = frame.style.right || '20px';
-      }
-      if (!style.width) frame.style.width = frame.style.width || '300px';
-      if (!style.height && !frame.style.height) frame.style.height = '160px'; /* provisional, until the sandbox reports its real content height */
+      frames.place(frame, widget.style || {});
 
       fieldBaselines.clear();
       uploadGroups.clear();
@@ -400,37 +256,32 @@ export default defineContentScript({
       currentWidgetState = liveifyState(widget.state ? structuredClone(widget.state) : { items: [] }, fieldBaselines) || { items: [] };
       frame.contentWindow?.postMessage({ type: 'init', code: widget.code || '', state: currentWidgetState }, '*');
       lastPostedState = JSON.stringify(currentWidgetState);
-      lastCompletionSignature = completionSignature(currentWidgetState);  /* baseline — don't notify for it */
+      lastCompletionSignature = completionSignature(currentWidgetState);
       startLiveStatePoll();
 
       applyingInterface = false;
       reportApplyOutcome(true);
-
-      /* handlePageChange early-returns while applyingInterface is true, so any field revealed DURING
-       * the (up to 8s) sandbox-ready wait left no mutation record. Re-diff the field set now against
-       * the pre-apply snapshot so such a reveal still forwards as a structural change. */
+      // a page change during the apply was skipped, so check once now
       handlePageChange([]);
     }
 
-    /* Each default-prone field's starting value, so a real default doesn't read as input — taken from
-     * when the field first appeared, so a widget (re)applied after the user filled it still counts it. */
     function recordBaselines(items: WidgetItem[]) {
       for (const item of items) {
         if (!item) continue;
         for (const selector of itemSelectors(item)) {
-          const el = resolveSelector(selector);
+          const resolved = resolveSelector(selector);
+          // a label is compared by the control it names
+          const el = resolved ? answeringElement(resolved) : null;
           if (el && isDefaultProneField(el)) fieldBaselines.set(selector, initialValues.get(el) ?? fieldValue(el));
         }
       }
     }
 
-    /* A page change that only added or removed questions, applied to the widget already showing
-     * instead of regenerating it (the panel's processStructuralChange fast path) — ~1s instead of a
-     * full model call. `ok: false` when there's no widget, or it doesn't track page elements at all (a
-     * tutorial's manual steps): the panel regenerates instead, since only the model can decide where a
-     * new form question fits in a widget like that. */
+    /*
+    Splices added and removed questions into the widget already showing, without regenerating it
+    */
     function updateWidgetItems(add: WidgetItem[], remove: string[]): { ok: boolean; added: number; removed: number } {
-      const frame = document.querySelector('iframe[data-pageassist-interface]') as HTMLIFrameElement | null;
+      const frame = frames.current();
       const items = currentWidgetState?.items;
       if (!frame || !interfaceReady || !currentWidgetState || !Array.isArray(items)) return { ok: false, added: 0, removed: 0 };
       const tracksPage = items.some((item) => item && !item.manual && itemSelectors(item).length > 0);
@@ -442,45 +293,48 @@ export default defineContentScript({
       currentWidgetState = liveifyState({ ...currentWidgetState, items: result.items }, fieldBaselines) || currentWidgetState;
       frame.contentWindow?.postMessage({ type: 'state', state: currentWidgetState }, '*');
       lastPostedState = JSON.stringify(currentWidgetState);
-      lastCompletionSignature = completionSignature(currentWidgetState); /* the panel reports this update itself */
+      // the panel reports this update itself
+      lastCompletionSignature = completionSignature(currentWidgetState);
       return { ok: true, added: result.added, removed: result.removed };
     }
 
-    /* Cheap and instant (no network/model call) — re-reads live DOM state for whatever items the
-     * current widget cares about and pushes the refreshed state into the sandbox, which re-runs its
-     * own render(state). This is what makes a checklist reflect real completion without the model
-     * ever having to compute or represent that itself. */
+    /*******************************************************************************************
+    Live completion
+    *******************************************************************************************/
+
+    /*
+    Re-reads the page for the widget's items and pushes the new state into the sandbox, which
+    re-runs its render(state). No model call.
+    */
     let lastCompletionSignature = '';
-    let lastPostedState = ''; /* JSON of the state the sandbox last rendered */
+    let lastPostedState = '';
     function completionSignature(state: WidgetState | null): string {
       if (!state || !Array.isArray(state.items)) return '';
       return state.items.map((item) => (item && item.complete ? '1' : '0')).join('');
     }
     function pushLiveState() {
       if (!currentWidgetState || !interfaceReady) return;
-      const frame = document.querySelector('iframe[data-pageassist-interface]') as HTMLIFrameElement | null;
+      const frame = frames.current();
       if (!frame) return;
       currentWidgetState = liveifyState(currentWidgetState, fieldBaselines) || currentWidgetState;
-      /* Re-render only when something actually changed. This runs on every click, keystroke and DOM
-       * change plus a 2s poll, and each render rebuilds the widget — which used to snap it back to the
-       * top while the user was scrolling it. */
+      // re-render only when something actually changed
       const posted = JSON.stringify(currentWidgetState);
       if (posted === lastPostedState) return;
       lastPostedState = posted;
       frame.contentWindow?.postMessage({ type: 'state', state: currentWidgetState }, '*');
-      /* Tell the panel when a completion flag actually flipped, so it can show a brief "updated" note. */
+
+      // tells the panel when an item's completion flips
       const signature = completionSignature(currentWidgetState);
       if (lastCompletionSignature !== '' && signature !== lastCompletionSignature) {
-        try {
-          globalThis.chrome?.runtime?.sendMessage({ source: 'pageassist-plugin', type: 'WIDGET_STATE_CHANGED' })?.catch(() => {});
-        } catch (_) { /* extension context gone */ }
+        try { sendToPanel({ type: 'WIDGET_STATE_CHANGED' }); } catch { /* invalidated context */ }
       }
       lastCompletionSignature = signature;
     }
 
-    /* Custom widgets (react-select dropdowns, segmented toggles) update via framework state without
-     * firing native input/change events, so the listeners below never see them. The MutationObserver
-     * does — hook a debounced re-check to it — plus a slow safety-net poll while a widget is shown. */
+    /*
+    Custom widgets change through framework state without input or change events, so mutations
+    also trigger a re-check, plus a slow poll while a widget is shown
+    */
     let liveStateTimer: number | undefined;
     let liveStatePoll: number | undefined;
     function scheduleLiveState() {
@@ -496,160 +350,70 @@ export default defineContentScript({
       window.clearInterval(liveStatePoll);
     }
 
+    /*******************************************************************************************
+    Page changes
+    *******************************************************************************************/
+
     let mutationTimer: number | undefined;
     let mutationsPendingSince = 0;
     let pendingMutations: MutationRecord[] = [];
-    let lastFieldSnapshot: FieldSnapshot | undefined; /* the page's questions as of the previous scan */
+    // the page's questions as of the previous scan
+    let lastFieldSnapshot: FieldSnapshot | undefined;
     const MUTATION_DEBOUNCE_MS = 400;
-    const MUTATION_MAX_WAIT_MS = 2500; /* force-fire even if churn never leaves a quiet window */
+    // fires anyway if the page never goes quiet
+    const MUTATION_MAX_WAIT_MS = 2500;
 
-    /* getSelector / describeMutation live in ../lib/mutations.ts. */
-
+    /*
+    Debounces a burst of mutations into one scan, then sends the page-change event to the panel
+    */
     function handlePageChange(mutations: MutationRecord[] = []) {
       if (applyingInterface || contextInvalidated) return;
       pendingMutations.push(...mutations);
-
-      /* Trailing debounce (collapse a burst into one send) BUT with a max-wait ceiling: continuous
-       * unrelated DOM churn nearby (an ad, a polling widget, a "typing…" indicator) never leaves a
-       * quiet MUTATION_DEBOUNCE_MS window, which would otherwise starve real updates forever. */
       const now = Date.now();
       if (!mutationTimer) mutationsPendingSince = now;
       window.clearTimeout(mutationTimer);
       const wait = now - mutationsPendingSince >= MUTATION_MAX_WAIT_MS ? 0 : MUTATION_DEBOUNCE_MS;
       mutationTimer = window.setTimeout(() => {
         mutationTimer = undefined;
-        const scan = scanPage();
-        const activeElement = document.activeElement;
-        const described = pendingMutations.slice(0, 100).map(describeMutation);
-        /* "Structural" = a question appeared, came into view, went out of view, or left vs. the last snapshot (see
-         * diffFieldSnapshots). The snapshot is seeded at startup and again after each widget apply,
-         * so the very first real change after a page settles is diffed against a genuine baseline
-         * rather than always reading as 0. */
-        const fields = lastFieldSnapshot ? carryUploadFields(lastFieldSnapshot, scan.fields) : scan.fields;
-        const diff = lastFieldSnapshot
-          ? diffFieldSnapshots(lastFieldSnapshot, fields)
-          : { added: [], revealed: [], removed: [], hidden: [] };
+        const { event, fields } = buildPageChangeEvent(scanPage(), lastFieldSnapshot, pendingMutations);
         lastFieldSnapshot = fields;
-        const revealedCount = diff.revealed.reduce((n, group) => n + group.length, 0);
-        /* A question going hidden is no longer part of the task: it's dropped like one that left the
-         * DOM (and added back if it's revealed again). */
-        const gone = [...diff.removed, ...diff.hidden];
-        const structural = diff.added.length + revealedCount + gone.length >= 1;
-        /* The actual field descriptors, so the panel can PATCH the task representation (splice in
-         * just these) instead of re-modelling the whole page. Revealed questions stay grouped: the
-         * backend adds one only if the task representation doesn't already map it. */
-        const addedFields = diff.added.slice(0, 25);
-        const revealedFields = diff.revealed.slice(0, 10);
-        const event = {
-          type: 'page.changed',
-          url: location.href,
-          structural,
-          fieldsAdded: diff.added.length + revealedCount,
-          fieldsRemoved: gone.length,
-          addedFields,
-          revealedFields,
-          removedFields: gone.slice(0, 25),
-          addedContainers: containersReferencedBy([...addedFields, ...revealedFields.flat()], scan.containers),
-          target: {
-            title: document.title,
-            forms: document.forms.length,
-            selector: activeElement?.id ? `#${activeElement.id}` : activeElement?.tagName?.toLowerCase(),
-          },
-          payload: { elements: scan.elements.length, mutations: described },
-        };
         pendingMutations = [];
-        if (globalThis.chrome?.runtime?.sendMessage) {
-          try {
-            /* Manifest V3's sendMessage returns a promise when called without a callback; it rejects
-             * ("Could not establish connection") whenever no extension page has a listener open right
-             * now (e.g. the side panel isn't open on this tab) — confirmed live as an unhandled
-             * rejection on every page interaction, on every site, regardless of whether the extension
-             * is in use. That's an expected, benign case here, not a real failure. */
-            globalThis.chrome.runtime.sendMessage({ source: 'pageassist-plugin', type: 'PAGE_CHANGED', event })?.catch(() => {});
-          } catch (_) {
-            /* The extension was reloaded/updated while this page was already open; stop trying. */
-            teardownOnInvalidatedContext();
-          }
+        try {
+          sendToPanel({ type: 'PAGE_CHANGED', event });
+        } catch {
+          teardownOnInvalidatedContext();
         }
         window.postMessage({ source: 'pageassist-plugin', type: 'PAGE_CHANGED', event }, '*');
       }, wait);
     }
 
-    /* The widget's own content lives inside its sandboxed iframe's separate (opaque-origin) document,
-     * invisible to this observer by construction — so its own updates can never self-trigger a "page
-     * changed" loop. The one exception is the iframe element itself being inserted into the host
-     * page, which the closest('[data-pageassist-interface]') checks below still exclude. */
     const observer = new MutationObserver((mutations) => {
-      /* A field that just appeared hasn't been touched yet — record its starting value now. */
+      // a field that just appeared hasn't been touched yet, so record its starting value now
       for (const mutation of mutations) {
         mutation.addedNodes.forEach((node) => { if (node.nodeType === Node.ELEMENT_NODE) recordInitialValues(node as Element, initialValues); });
       }
-      const changedOutsideInterface = mutations.some((mutation) => {
-        if (mutation.type === 'attributes' && mutation.attributeName === 'data-tw-ref') return false; /* our own stamping */
-
-        const targetElement = mutation.target.nodeType === Node.TEXT_NODE ? mutation.target.parentElement : mutation.target;
-        const target = targetElement instanceof Element ? targetElement : null;
-        const addedOutsideInterface = [...mutation.addedNodes].some((node) => {
-          return node.nodeType !== Node.ELEMENT_NODE || !(node as Element).closest('[data-pageassist-interface]');
-        });
-        const removedOutsideInterface = [...mutation.removedNodes].some((node) => {
-          return node.nodeType !== Node.ELEMENT_NODE || !(node as Element).closest('[data-pageassist-interface]');
-        });
-        return !target?.closest('[data-pageassist-interface]') && (addedOutsideInterface || removedOutsideInterface || mutation.type === 'attributes');
-      });
-      const hasTextChange = mutations.some((mutation) => mutation.type === 'characterData');
-      if (changedOutsideInterface || hasTextChange) {
-        /* Structural pipeline ONLY when a real field element actually entered or left the DOM — NOT
-         * when an existing control merely expands/collapses (opening a react-select adds only
-         * listbox/option nodes, which this ignores). That misfire used to consume the debounce
-         * window so the real follow-up field's reveal never registered as structural. */
-        if (mutationsIncludeFieldChange(mutations)) {
-          handlePageChange(mutations); /* 400ms-debounced -> backend (possible structural regeneration) */
-        }
-        scheduleLiveState();           /* 200ms-debounced -> local re-check of completion flags (always) */
-      }
+      if (!changedOutsideInterface(mutations)) return;
+      if (mutationsIncludeFieldChange(mutations)) handlePageChange(mutations);
+      scheduleLiveState();
     });
 
-    /* Wires the MutationObserver above into the real document plus every reachable same-origin
-     * shadow root / iframe — anything that isn't the widget's own sandboxed iframe. */
-    function observeRoot(rootNode: Document | ShadowRoot) {
-      recordInitialValues(rootNode, initialValues);
-      observer.observe(rootNode, { childList: true, subtree: true, attributes: true, characterData: true, attributeOldValue: true, characterDataOldValue: true });
-      rootNode.querySelectorAll?.('*').forEach((element) => {
-        if (element.shadowRoot) observeRoot(element.shadowRoot);
-        if (element.tagName === 'IFRAME' && !element.hasAttribute('data-pageassist-interface')) {
-          try {
-            const frameDocument = (element as HTMLIFrameElement).contentDocument;
-            if (frameDocument) observeRoot(frameDocument);
-          } catch (_) {
-            /* Cross-origin frames cannot be observed by the content script. */
-          }
-        }
-      });
-    }
-
-    observeRoot(document);
-    /* Seed the structural-change baseline immediately, so the first field the page reveals after it
-     * settles is diffed against a real snapshot instead of establishing one (and reading as "no
-     * change"). */
+    // watches the page, its shadow roots and its iframes, recording each field's starting value
+    observeTree(observer, document, (rootNode) => recordInitialValues(rootNode, initialValues));
+    // the first snapshot, so the first question the page reveals is diffed against a real one
     lastFieldSnapshot = scanPage().fields;
-    document.querySelectorAll('iframe').forEach((frame) => frame.addEventListener('load', () => {
-      try {
-        if (frame.contentDocument) observeRoot(frame.contentDocument);
-      } catch (_) {
-        /* Cross-origin frames cannot be observed by the content script. */
-      }
-    }));
-    /* Structural detection is driven ONLY by the MutationObserver above (a field entering/leaving
-     * the DOM is always a mutation). It used to ALSO run on every input/change/click, which meant a
-     * plain click — opening a dropdown, focusing a field — kicked off a page scan + PAGE_CHANGED
-     * every time. These listeners only refresh live completion state, which is cheap and has no
-     * network call. */
-    document.addEventListener('input', pushLiveState, true);
-    document.addEventListener('change', pushLiveState, true);
-    document.addEventListener('click', pushLiveState, true);
-    document.addEventListener('focusout', pushLiveState, true); /* a visited field's kept default counts */
 
+    /*
+    Refresh live completion. focusout covers a default the user kept as their answer.
+    */
+    for (const type of ['input', 'change', 'click', 'focusout']) document.addEventListener(type, pushLiveState, true);
+
+    /*
+    Messages from the side panel
+    - apply the webpage interface
+    - splice an update into the interface
+    - where the interface is, for a screenshot of it
+    - get the page elements on the current page
+    */
     try {
       globalThis.chrome?.runtime?.onMessage?.addListener((message, _sender, sendResponse) => {
         if (message?.type === 'APPLY_WEBPAGE_INTERFACE') {
@@ -657,12 +421,16 @@ export default defineContentScript({
           sendResponse({ ok: true });
         } else if (message?.type === 'UPDATE_WIDGET_ITEMS') {
           sendResponse(updateWidgetItems(Array.isArray(message.add) ? message.add : [], Array.isArray(message.remove) ? message.remove : []));
+        } else if (message?.type === 'GET_INTERFACE_RECT') {
+          // where the widget is, so the panel can screenshot just the widget for the records
+          const box = frames.current()?.getBoundingClientRect();
+          sendResponse(box ? { left: box.left, top: box.top, width: box.width, height: box.height, viewportWidth: window.innerWidth, viewportHeight: window.innerHeight } : null);
         } else if (message?.type === 'GET_PAGE_ELEMENTS') {
           const { elements, containers } = scanPage();
           sendResponse({ url: location.href, title: document.title, elements, containers, pageText: getPageText(), frames: countFrames() });
         }
       });
-    } catch (_) {
+    } catch {
       teardownOnInvalidatedContext();
     }
 

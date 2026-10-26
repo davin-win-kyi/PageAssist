@@ -62,20 +62,30 @@ tracker.
 
 | File | Purpose |
 |---|---|
-| `completion.ts` | The core "is this element/item actually filled or chosen?" logic — `isElementComplete` (one control, with wrapper/react-select/radio-group handling) and `isItemComplete` (a widget item's `selectors: [...]`, requiring every one). Answered means: non-empty text (never just spaces), a checked checkbox, any option of a radio group, a chosen file, a dropdown option with a non-empty value, or a supported custom selection state. A wrapper is decided by its own answer — its choices, else its own answer field, else the value a custom dropdown shows — never by a neighbouring filled control, and never while every option is unchecked. A pre-filled field counts once changed to a value that is itself an answer, or once the user has visited it (focused it, then moved on) and left a real default in place — an untouched default never counts; a checkbox/switch/toggle is read from its state, never from having been clicked; "None" / "N/A" are answers, not placeholders. Pure DOM reads; no browser APIs beyond the DOM itself, so it runs the same way in a real page and in the linkedom-based tests. |
-| `selectors.ts` | How a real element gets turned into a CSS selector string, an ARIA role, an accessible name, and an accessible description (help text / validation message) — one implementation so every caller (page scanning, click tracking, widget-item grounding) agrees. Names follow the ARIA order (`aria-labelledby` before `aria-label`), links/buttons/headings are named by their own text, and names/descriptions come back in full — any length limit is the caller's. Selectors are identity-based, never positional. `stableSelector` stamps a `data-tw-ref` attribute onto an element that has nothing else unique about it, or whose testid/name/aria-label is shared with an earlier element (a second education entry reusing `name="school"`); a stamp sticks from then on. |
-| `page-scan.ts` | `scanPage()` walks the live DOM (into shadow roots and same-origin iframes) into what the backend analyzes: the element list, the context containers that keep their relationships, and a field snapshot keyed by *question*. Anything inside a transient layer (an open dropdown, tooltip, calendar — matched by role or by a popup-ish class) is left out, but a popup-looking class on `<html>`/`<body>` or on a wrapper holding the page's main content, h1 or a whole form doesn't count: WordPress themes put `sticky-menu-fade` / `dropdown-hover` on `<body>`, which used to drop the entire page. `diffFieldSnapshots` compares two snapshots (added / revealed / removed / hidden questions) and `mutationsIncludeFieldChange` is the MutationObserver gate in front of it. Also `getPageText()`, for widget items grounded in page prose rather than a form field. |
-| `mutations.ts` | Turns a raw `MutationRecord` into the compact, JSON-safe shape the panel reasons about (`describeMutation`) — the stable identities (never a bare tag like `div`) of the controls added and removed, including those nested inside an added/removed wrapper, how many controls (not subtrees) came or went, and truncated text. Text, comment, document and shadow-root targets resolve to the element they belong to. Never decides anything itself. |
+| `completion.ts` | The core "is this element/item actually filled or chosen?" logic — `isElementComplete` (one control, with wrapper/react-select/radio-group handling) and `isItemComplete` (a widget item's `selectors: [...]`, requiring every one). Answered means: non-empty text (never just spaces), a checked checkbox, any option of a radio group, a chosen file, a dropdown option with a non-empty value, or a supported custom selection state. A wrapper is decided by its own answer — its choices, else its own answer field, else the value a custom dropdown shows — never by a neighbouring filled control, and never while every option is unchecked. A pre-filled field counts once changed to a value that is itself an answer, or once the user has visited it (focused it, then moved on) and left a real default in place — an untouched default never counts; a checkbox/switch/toggle is read from its state, never from having been clicked; "None" / "N/A" are answers, not placeholders. Only elements whose state changes when answered are tracked. `isActionElement` marks actions (buttons, links, `summary`, tabs, and submit/button/reset/image inputs, whose `value` is never read as an answer), and they are never complete; a button with a state (`aria-pressed`, `aria-checked`, a dropdown trigger showing its choice, a chosen class) is not an action. Beyond native fields it handles custom sliders and spin buttons (`aria-valuenow`, judged against their starting value like a native number), custom textboxes (`role="textbox"`/`"searchbox"`, ignoring their own placeholder text), standalone listboxes (a selected `role="option"`, but not a dropdown's option list), a checkbox in the `mixed` state, and elements that only label a question, judged by what they name (`answeringElement`): a `<label>` by its control, an element whose id a control points at with `aria-labelledby`, a `<legend>` by its fieldset, and a table row's header by its row. Pure DOM reads; no browser APIs beyond the DOM itself, so it runs the same way in a real page and in the linkedom-based tests. |
+| `selectors.ts` | How a real element gets turned into a CSS selector string, an ARIA role, an accessible name, and an accessible description (help text / validation message) — one implementation so every caller (page scanning, mutation reports, widget-item grounding) agrees. Names follow the ARIA order (`aria-labelledby` before `aria-label`), links/buttons/headings are named by their own text, and names/descriptions come back in full — any length limit is the caller's. Selectors are identity-based, never positional. `stableSelector` always returns a selector that matches only that element, and nothing content.ts would find first in the page's own document: its id (when no other element shares it), an identifying attribute (`data-testid`, `name`, `aria-label`, `placeholder`, …) alone or combined with narrowing ones (`type`, `role`, … and `value` for choices and buttons only, since React rewrites a text field's `value` attribute as the user types) so radios sharing a name are told apart by value, then those or the bare tag scoped under the closest uniquely identified ancestor, and only then a `data-tw-ref` stamp. A chosen selector sticks while it still finds its element first, so adding a look-alike later (a second education entry reusing `name="school"`) doesn't change the first one's identity. |
+| `page-scan.ts` | `scanPage()` walks the live DOM (into shadow roots and same-origin iframes) into what the backend analyzes: the element list, the context containers that keep their relationships, and a field snapshot keyed by *question*. Anything inside a transient layer is left out: an open dropdown, menu, tooltip, autocomplete list or calendar, matched by ARIA role, by popup-ish class names (generic ones plus the popup classes of common libraries: popper/Floating UI, Radix, Headless UI, Tippy, Select2, Chosen, Selectize, Tom Select, Choices.js, Google Places, intl-tel-input, jQuery UI, Angular Material, Ant Design, Element, Vuetify, PrimeReact, Kendo, and the common date pickers), or by being the element an open combobox or popup trigger points at with `aria-controls`/`aria-owns` (a plain disclosure button's section is not a popup). Names a field itself also uses are only matched in their popup forms: Materialize puts `select-dropdown` on the select's visible input, and layers that can also hold a dialog (Vuetify 3's `v-overlay__content`) are left out, since a dialog can hold real questions. A popup-looking class on `<html>`/`<body>`, or on a wrapper holding the page's main content, h1 or a whole form, doesn't count either: WordPress themes put `sticky-menu-fade` / `dropdown-hover` on `<body>`, which used to drop the entire page. `isElementVisible` counts as hidden: `hidden`/`inert`, no box, `display:none`, `visibility:hidden`/`collapse`, `content-visibility:hidden`, `opacity:0` (the element's own, except for a control, since styled radios hide the native input behind a custom one; or any ancestor's), and a collapsed container that clips its content (a `position: fixed` element escapes that clipping). A field no one can reach is hidden too: out of the tab order, and hidden from assistive technology or moved far off the page, like a newsletter's spam trap or a react-select's hidden validation input. One scan shares a cache, so each container's style is read once. `diffFieldSnapshots` compares two snapshots (added / revealed / removed / hidden questions). Also `getPageText()`, for widget items grounded in page prose rather than a form field. |
+| `mutations.ts` | The mutation logic content.ts uses. `observeTree` watches the page, its shadow roots and its same-origin iframes (again after an iframe loads a new document); `changedOutsideInterface` drops mutations in the widget frame and the selectors' own `data-tw-ref` stamps; `mutationsIncludeFieldChange` is the MutationObserver gate (could this have added, removed, shown or hidden a question?); `buildPageChangeEvent` diffs the new scan against the last snapshot into the `PAGE_CHANGED` event; `describeMutation` turns a raw `MutationRecord` into a compact, JSON-safe summary — the stable identities (never a bare tag like `div`) of the controls added and removed, including those nested inside an added/removed wrapper, how many controls came or went, and truncated text. |
 | `widget-items.ts` | Helpers for a widget's `state.items`: `itemSelectors`, `isItemRequired` (whether the page marks an item's question required — its own `required` / `aria-required` with `"false"` a clear no, a radio group's `required` option, the nearest wrapper's `aria-required`, else an asterisk or "(required)" in its label or its fieldset/group's label), and `spliceWidgetItems` (applies a page change to a widget already showing: drops controls that left, adds each new answerable question in page order with its neighbour's `section`, skips headings/buttons/anything already tracked). |
+| `interface-frame.ts` | The widget's `<iframe>` on the host page (`createInterfaceFrame`): creating it, loading a fresh sandbox document into it for every new widget (`reload`), docking a frame with no position yet bottom-right at a readable size, fitting its height to the content the sandbox reports (unless pinned), and moving it on a drag. It handles the sandbox's frame requests (`dragStart`/`dragEnd`, `resize`, `setHeight`, `resetHeight`). A dragged frame keeps its place because it has a left/top position of its own, so no separate "moved" flag is kept; a position the widget asks for replaces it. This has to run on the host page: the sandbox can't move or size its own frame. |
 | `frame-drag.ts` | The host side of dragging the widget's frame (`startFrameDrag`). The widget only calls `window.pageassist.startDrag(event)`; the host then moves the frame by the pointer's `screenX`/`screenY` (client coordinates shift as the frame moves), and for the drag's duration covers the page with a transparent layer — an out-of-process iframe stops receiving pointer events once the pointer leaves it, so without the layer a fast flick drops the drag. Positions from the layer and from the widget's forwarded events share one running position, so nothing is counted twice; the layer comes down on release, on cancel, or on a move with no button held. |
+| `screenshot.ts` | Screenshots of the widget for the study records: `cropBox` finds the widget in a screenshot of the tab, scaled to the screen's pixel density, and `cropScreenshot` cuts it out as a PNG, so nothing else on the page is kept. |
 | `frame-style.ts` | Applies host-owned CSS (position/size only) to the widget's outer `<iframe>`, with a small denylist (`url()`, `expression()`, `javascript:`, `@import`) against a widget trying to load external resources or execute code through a CSS value. |
 | `api.ts` | The backend base URL and a `fetch` wrapper with a hard timeout — the Anthropic-backed endpoints have none of their own, so a hung call would otherwise leave the panel stuck forever. |
 | `extension.ts` | The narrow slice of the `chrome.*` API the side panel actually uses, typed, plus `requestPageElements()` — the one-shot "ask the active tab's content script for its page elements", including the force-inject-if-missing retry. |
 
-`lib/completion.ts`, `lib/page-scan.ts`, `lib/widget-items.ts` and `lib/frame-drag.ts` have node tests at
+`lib/completion.ts`, `lib/selectors.ts`, `lib/page-scan.ts`, `lib/mutations.ts`, `lib/widget-items.ts`, `lib/frame-drag.ts` and `lib/interface-frame.ts` have node tests at
 [`../tests/plugin/`](../tests/PageAssist_Tests.md) — e.g. `node tests/plugin/completion.test.ts`.
 
 ## Side panel (`sidepanel/App.tsx`)
+
+`App.tsx` holds the state and logic; the rest is split out beside it: `ChatTab.tsx` and
+`SavedTab.tsx` (the two tabs' layout), `types.ts` (the schemas shared with the backend, and the
+panel's own state types), `backend.ts` (every backend call; a failed call throws with the backend's
+own message, which the panel shows), `page-messages.ts` (the messages between the panel and the
+content script: apply a widget, splice a page change, and `listenToPage` for page changes and
+completion updates) and `helpers.ts` (site ids, the sparse-page check, merging queued page changes,
+saved-entry accents, default save names).
 
 The only UI surface in the extension, and the orchestrator — it is what decides *when* to talk to the
 backend and *when* to push a widget onto the page; neither the content script nor the sandbox ever
@@ -100,8 +110,18 @@ decides that themselves (see the conversation walkthrough under How it works abo
   widget already on the page (`UPDATE_WIDGET_ITEMS`, from the patch's `added_items`) — seconds, not a
   ~70s regeneration. It regenerates only when the patch fails (a full `analyze` first) or the widget
   doesn't track page elements at all (a tutorial's manual steps), since only the model can decide
-  where a form question fits in a widget like that. Value edits are ignored (the checklist updates live client-side). The
+  where a form question fits in a widget like that. Removals are always spliced out, even when the patch reports no component change, so a question that left the page leaves the widget too. A change that arrives while another is being applied is queued and applied right after, never dropped. Value edits are ignored (the checklist updates live client-side). The
   widget only ever appears on explicit user action.
+- Keeps the study records (see the backend's Study records): tells the backend why each widget is
+  built, takes a screenshot of just the widget when it appears and after a page change is spliced
+  into it (`captureInterface`: the tab's visible area from `chrome.tabs.captureVisibleTab`, cut down
+  to the frame the content script reports), and sends the errors it shows, the widget's own code
+  errors, and how each page change was applied.
+- Shows failures to the user, with the reason: a chat turn that fails, an analysis that fails, a
+  widget generation that fails (the red warning widget on the page plus a line in the chat), a
+  generate request that fails, and a page change the support couldn't be updated for. A page change
+  whose task-representation update failed still has its removals spliced into the widget, and the
+  task representation is redone before the next widget is generated.
 - Debounces navigation events (`tabs.onUpdated` / `onActivated` / `webNavigation.onHistoryStateUpdated`)
   and never runs two analyses at once — a burst of SPA `pushState` calls collapses into one analyze.
 - Also owns the "Saved" tab: a small reusable database of named interface representations (list /
@@ -127,7 +147,7 @@ It maintains three pieces of live state about the page it's running on, and does
    This is the thing that eventually becomes the backend's task representation.
 2. **Watch for change** — a `MutationObserver` (debounced 400 ms) emits a `PAGE_CHANGED` runtime
    message only when a mutation could have changed the page's **questions**
-   (`mutationsIncludeFieldChange`): a control added/removed outside any dropdown, tooltip, or calendar,
+   (`mutationsIncludeFieldChange`, `lib/mutations.ts`): a control added/removed outside any dropdown, tooltip, or calendar,
    or something containing a control being shown or hidden (`hidden` / `aria-hidden` / `open`, an
    inline `display:none`, a visibility-ish class like `is-hidden`). Typing, focus, and a wrapper's
    `is-focused` / `has-value` class churn never pass. `structural` is then decided by
@@ -154,14 +174,19 @@ It maintains three pieces of live state about the page it's running on, and does
    backend README. (Completion state has its own instant, un-debounced `input`/`change`/`click`
    listeners — see step 4.) This is what the panel's `staleTaskRepRef` / `processStructuralChange`
    react to.
-3. **Host the widget** — creates the sandboxed iframe (`sandbox.html`) and posts the widget's `code`
-   and `state` into it (see the sandbox section below). Draws **no chrome of its own** — a widget that
-   wants a drag handle or close button draws it itself and calls `window.pageassist.*` (see Messaging).
+3. **Host the widget** — creates the sandboxed iframe (`sandbox.html`, via `lib/interface-frame.ts`,
+   which also places, sizes and drags it) and posts the widget's `code` and `state` into it (see the
+   sandbox section below). Every new widget gets a fresh sandbox document, so no earlier widget's
+   listeners or timers keep running next to it; widgets are applied one at a time, in order. Draws
+   **no chrome of its own** — a widget that wants a drag handle or close button draws it itself and
+   calls `window.pageassist.*` (see Messaging).
 4. **Keep live state accurate** — a second, un-debounced set of listeners re-reads each tracked
-   element's real filled/clicked state (`liveifyState`, using `isElementComplete` / `isItemComplete`
+   element's real filled or chosen state (`liveifyState`, using `isElementComplete` / `isItemComplete`
    from `lib/completion.ts`) on every keystroke, click and DOM change (plus a 2 s poll), and pushes the
    state into the sandbox only when it actually changed — every push re-renders the widget, and the
-   sandbox carries the widget's scroll positions across each re-render. No network or model call. This
+   widget's own code keeps its scroll positions across each re-render. No network or model call. An
+   item whose elements are all actions, like a submit button, is left as it is: nothing on the page
+   could show it as done. This
    is what makes a checklist tick off in real time, and it's the only place "is this item done?" is
    ever actually computed — the model never asserts completion itself. When a widget is applied, each
    tracked file input's upload group is remembered, so an upload whose input was swapped for a file chip
@@ -176,8 +201,8 @@ It maintains three pieces of live state about the page it's running on, and does
 
 So, concretely, what content.ts is "building up" over a page's lifetime is: a running snapshot of the
 page's field set (for structural-change detection), the currently-applied widget's `code` + live
-`state` (for the sandbox), and a running set of selectors the user has clicked (for button/link-style
-checklist items that have no fillable "value" of their own).
+`state` (for the sandbox), and the fields the user has visited (so a default they kept counts as their
+answer). Clicks aren't tracked: a button or link has no state of its own to read.
 
 ## Widget sandbox (`sandbox/main.ts`) — what it's for, and its properties
 
@@ -214,10 +239,19 @@ code is trusted to respect):
 - **One deliberate `eval`.** The generated code is executed via `new Function(data.code)()` — the only
   eval in the whole system, and safe specifically *because* everything above already holds: opaque
   origin, no network, message-only communication.
-- **`window.pageassist.*`** is the *only* capability the host grants back to generated code over its own
-  frame: `startDrag(event)`, `move(dx, dy)`, `close()`, `setHeight(px)` / `resetHeight()`. Each is a thin
-  `postMessage` to the content script (see Messaging below) — none of them can touch the real page.
-- **Content-height reporting.** Since the host can't measure the sandboxed document's height directly
+- **The widget's code does everything in the widget.** The runtime only locks down the network,
+  runs the code, reports the content height, and offers `window.pageassist.*`: `startDrag(event)`,
+  `close()`, `setHeight(px)` / `resetHeight()`, the things only the page can do because the frame
+  belongs to it. Each is a one-line `postMessage` to the content script (see Messaging below) — none
+  of them can touch the real page. Keeping scroll positions across a re-render is the widget code's
+  job (the generation prompt's code contract says so; checked on generated widgets in Chromium).
+- **Why the drag itself runs on the page.** The frame can't move itself (its position is a style on
+  the page's `<iframe>`), and an out-of-process iframe gets no pointer events once the pointer leaves
+  it, even with `setPointerCapture` or a selection drag (tested in Chromium with site isolation: a
+  2-step flick never reached the frame in any of 5 variants). So `startDrag` only tells the page
+  where the drag started; the page's drag layer covers the frame and moves it from then on, and a
+  release inside the frame before the layer is up still ends it.
+- **Content-height reporting.** Only after the widget's first draw, so the frame never shrinks to an empty page first. Since the host can't measure the sandboxed document's height directly
   (opaque origin), a `ResizeObserver` on `document.body` reports height changes back to the host after
   every render, which is how the frame auto-fits its content.
 
@@ -234,10 +268,10 @@ grounded items from the page; any other key the model put on an item (e.g. `sect
 
 | Channel | Direction | Messages |
 |---|---|---|
-| `chrome.tabs.sendMessage` | panel → content script | `GET_PAGE_ELEMENTS` (→ `{url, title, elements}`), `APPLY_WEBPAGE_INTERFACE {tree}` (`null` tree removes), `UPDATE_WIDGET_ITEMS {add, remove}` (→ `{ok, added, removed}`; `ok: false` means regenerate instead) |
-| `chrome.runtime.sendMessage` | content script → panel | `PAGE_CHANGED {event}` |
+| `chrome.tabs.sendMessage` | panel → content script | `GET_PAGE_ELEMENTS` (→ `{url, title, elements}`), `APPLY_WEBPAGE_INTERFACE {tree}` (`null` tree removes), `UPDATE_WIDGET_ITEMS {add, remove}` (→ `{ok, added, removed}`; `ok: false` means regenerate instead), `GET_INTERFACE_RECT` (→ the widget frame's box and the visible area's size, for a screenshot of it) |
+| `chrome.runtime.sendMessage` | content script → panel | `PAGE_CHANGED {event}`, `WIDGET_STATE_CHANGED`, `WIDGET_ERROR {message}` (the widget's code threw), `WEBPAGE_INTERFACE_APPLIED {ok}` |
 | `iframe.contentWindow.postMessage` | content script ↔ sandbox | host → `{type:'init', code, state}`, `{type:'state', state}` |
-| `window.parent.postMessage` | sandbox → content script | `sandbox-ready`, `resize {height}`, `error {message}`, and the `window.pageassist` calls below (`dragStart` / `dragMove {screenX, screenY}` / `dragEnd` for a drag) |
+| `window.parent.postMessage` | sandbox → content script | `sandbox-ready`, `resize {height}`, `error {message}`, and the `window.pageassist` calls below (`dragStart {screenX, screenY}` / `dragEnd` for a drag) |
 
 ### `window.pageassist` — the only host capabilities the widget gets
 
@@ -247,7 +281,6 @@ those draws the control itself and calls:
 | Call | Effect |
 |---|---|
 | `window.pageassist.startDrag(event)` | call from a drag handle's `pointerdown`: the host moves the frame with the pointer until it's released (`lib/frame-drag.ts`) — the widget writes no drag logic |
-| `window.pageassist.move(dx, dy)` | nudge the frame by a pixel delta |
 | `window.pageassist.close()` | remove the widget |
 | `window.pageassist.setHeight(px)` | pin the frame height |
 | `window.pageassist.resetHeight()` | release the pin (back to auto-fit from reported content height) |

@@ -2,8 +2,9 @@
   "name": "pageassist-tests",
   "private": true,
   "type": "module",
-  "description": "Node test scripts for plugin/ (backend tests are plain Python, see tests/backend/).",
+  "description": "Node test scripts for plugin/, and the end-to-end test of the live pilot pages in e2e/ (backend tests are plain Python, see tests/backend/).",
   "devDependencies": {
-    "linkedom": "^0.18.13"
+    "linkedom": "^0.18.13",
+    "playwright-core": "^1.62.1"
   }
 }

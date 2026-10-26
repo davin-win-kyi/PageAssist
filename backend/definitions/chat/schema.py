@@ -1,26 +1,31 @@
-"""/chat wire shapes + the respond_and_update_interface tool input_schema."""
+"""
+The schemas for the chat: its request, the model's decision for a turn, and the
+reply_and_update_preferences tool
+"""
+
 from typing import Any, Literal
 
 from pydantic import BaseModel
 
+from definitions.interface_representation.schema import TREE_SCHEMA
+
 
 class ChatMessage(BaseModel):
-    """One prior turn of the conversation, as replayed to the model. Sent by the client."""
+    """One earlier turn of the conversation, sent by the panel."""
 
     role: Literal["user", "assistant"]
     content: str
 
 
 class ChatRequest(BaseModel):
-    """The body of POST /chat: the user's new message plus the conversation so far."""
+    """Body of POST /chat: the user's new message and the conversation so far."""
 
     message: str
     history: list[ChatMessage] = []
 
 
 class ChatDecision(BaseModel):
-    """Validates the model's `respond_and_update_interface` tool call. It carries the reply to show
-    plus three decisions: replace the interface representation, latch it as agreed, offer to save it."""
+    """The model's answer for one turn: the reply, plus what it changed about the interface."""
 
     reply: str
     suggestions: list[str] = []
@@ -31,20 +36,28 @@ class ChatDecision(BaseModel):
     suggested_name: str = ""
 
 
-CHAT_DECISION_TOOL = {
-    "name": "respond_and_update_interface",
-    "description": "Reply to the user and report whether the interface representation changed.",
+REPLY_AND_UPDATE_PREFERENCES_TOOL = {
+    "name": "reply_and_update_preferences",
+    "description": (
+        "Answer one turn of the PageAssist side panel chat. There the user describes something that's difficult "
+        "about a task on a webpage, or a support they already have in mind; you confirm your understanding, offer "
+        "support strategies, and shape the one they pick. Returns the reply and quick replies shown in the panel, "
+        "plus any change to the user's preferences: the interface representation, which is applied to the page "
+        "they're on and can be saved to reuse on other sites. Also returns whether they've settled on a strategy, "
+        "and whether to offer saving it."
+    ),
     "input_schema": {
         "type": "object",
         "properties": {
-            "reply": {"type": "string", "description": "What the user sees: at most 2-3 short sentences."},
+            "reply": {"type": "string", "description": "What the user sees in the chat: 1-3 short sentences."},
             "suggestions": {
                 "type": "array", "items": {"type": "string"}, "maxItems": 3,
-                "description": "Up to 3 quick replies, 1-4 words each, e.g. \"Checklist\", \"Progress bar\".",
+                "description": "Up to 3 quick replies shown under the reply, 1-4 words each.",
             },
             "interface_representation": {
+                **TREE_SCHEMA,
                 "type": ["object", "null"],
-                "description": "The full {component, description, style, preferences, children} tree on a turn that changes it; null on every other turn.",
+                "description": "The full tree on a turn that changes it; null on every other turn.",
             },
             "tree_needs_update": {
                 "type": "boolean",
@@ -54,40 +67,19 @@ CHAT_DECISION_TOOL = {
                 "type": "boolean",
                 "description": "True once the user has settled on a strategy; false while they're still describing or choosing. Stays true once set.",
             },
-            "offer_save": {"type": "boolean", "description": "True only on the turn you offer to save the interface."},
+            "offer_save": {
+                "type": "boolean",
+                "description": (
+                    "True only on the turn you offer to save the interface for reuse on other sites. The panel then shows a "
+                    "save option with suggested_name filled in. The user can keep it, or replace it with their own name or "
+                    "description, which can be longer."
+                ),
+            },
             "suggested_name": {
                 "type": "string",
-                "description": "2-5 words naming what the support does, e.g. \"Field completion checklist\", when offer_save is true; \"\" otherwise.",
+                "description": "A short name for what the support does, when offer_save is true; \"\" otherwise.",
             },
         },
         "required": ["reply", "suggestions", "agreed", "tree_needs_update"],
-    },
-}
-
-
-# Repair-path tool (see chat/router.py's _repair_interface_tree): used only when the main call above
-# says the tree changed (`tree_needs_update`) but sends no tree — observed live and reproducibly on
-# Gemini, which does NOT self-correct when the same combined call is retried. Asking for ONLY the
-# tree, split out of the reply/suggestions/agreed schema, reliably fills it. Its rules are
-# INTERFACE_REPRESENTATION_GUIDE (definitions/interface_representation/prompts.py).
-INTERFACE_TREE_TOOL = {
-    "name": "build_interface_representation",
-    "description": "Return the full interface representation tree.",
-    "input_schema": {
-        "type": "object",
-        "properties": {
-            "component": {"type": "string", "description": "Short slug for what the support is, e.g. \"checklist\"."},
-            "description": {"type": "string", "description": "One sentence on what the support does."},
-            "style": {"type": "object", "description": "CSS properties and values the user asked for."},
-            "preferences": {
-                "type": "array", "items": {"type": "string"},
-                "description": "Short phrases for what the node shows or how it behaves. Never page-specific.",
-            },
-            "children": {
-                "type": "array", "items": {"type": "object"},
-                "description": "Generic parts of the support, each a node of this same shape. Never one per page item.",
-            },
-        },
-        "required": ["component", "description", "preferences"],
     },
 }

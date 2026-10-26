@@ -1,5 +1,7 @@
 backend/.env
 backend/data/
+# the study records, which hold participants' data
+user_study/
 backend/.venv/
 __pycache__/
 *.pyc

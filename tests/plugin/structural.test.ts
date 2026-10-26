@@ -39,7 +39,8 @@ function loadPage(html: string) {
   return dom.document;
 }
 
-const { scanPage, diffFieldSnapshots, mutationsIncludeFieldChange, carryUploadFields } = await import('../../plugin/lib/page-scan.ts');
+const { scanPage, diffFieldSnapshots, carryUploadFields } = await import('../../plugin/lib/page-scan.ts');
+const { mutationsIncludeFieldChange } = await import('../../plugin/lib/mutations.ts');
 type Diff = ReturnType<typeof diffFieldSnapshots>;
 
 // Fields are keyed by their real ids/names here: a fresh document per snapshot means fresh nodes, and
@@ -274,9 +275,12 @@ console.log('\n== 11. "Add another education entry" ==');
 {
   const entry = (n: number) => `<fieldset class="education-entry"><legend>Education ${n}</legend>
     <label>School <input type="text" name="school" /></label><label>Degree <input type="text" name="degree" /></label></fieldset>`;
-  const before = entry(1);
+  // one page whose first entry persists while the second is added, as in a real page
+  const live = loadPage(entry(1));
+  const before = scanPage().fields;
+  live.body.insertAdjacentHTML('beforeend', entry(2));
+  const d = diffFieldSnapshots(before, scanPage().fields);
   const after = entry(1) + entry(2);
-  const d = change(before, after);
   check('a second entry whose names and labels repeat the first IS structural, with both its fields added', d.added.length, 2);
   check('  and the first entry\'s fields are not read as removed', d.removed, []);
   const doc = loadPage(after);

@@ -1,23 +1,14 @@
-"""Model-provider plumbing. Switch providers for every generative call in the backend with one env
-var — `LLM_PROVIDER=anthropic` (default) or `LLM_PROVIDER=gemini` — no changes needed at any call site.
-
-Every caller in api/endpoints/ only ever touches:
-  - get_client_and_model() / get_fast_client_and_model() -> (client, model) | (None, None)
-  - create_message(client, model=..., max_tokens=..., system=..., messages=..., tools=..., tool_choice=...)
-  - call_structured_tool(...)  (forced tool call + validate/retry loop, built on create_message)
-
-Either one takes an optional `thinking_level` ("low" / "medium" / "high") for that one call. Only
-Gemini uses it; the Anthropic branch drops it.
-
-Anthropic's native `Message` already has the shape every caller reads (`.content` blocks with `.type`,
-and `.id`/`.name`/`.input` on `tool_use` ones, plus `.stop_reason`), so the Anthropic branch returns it
-untouched. The Gemini branch translates to/from that same shape so the rest of the codebase never has
-to know which provider answered.
+"""
+Util methods for the model calls
+- LLM_PROVIDER picks Anthropic (the default) or Gemini for every call
+- the thinking level of each kind of call
+- a model that isn't set up, or a call that fails, raises ModelError, which the API returns to the
+  side panel
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Callable
 import os
 
@@ -28,51 +19,70 @@ from google.genai import types as genai_types
 ToolInput = dict[str, Any]
 
 PROVIDER = (os.getenv("LLM_PROVIDER") or "anthropic").strip().lower()
-DEFAULT_THINKING_LEVEL = "medium"  # Gemini only — see _gemini_create_message
 
 
-# --- Client/model lookup, per provider --------------------------------------------------------
+# ****************************************************************************************************
+# Thinking levels (Gemini only; the Anthropic branch ignores them)
+# ****************************************************************************************************
 
-def _anthropic_client_and_model(model: str | None) -> tuple[AsyncAnthropic | None, str | None]:
-    api_key = os.getenv("ANTHROPIC_API_KEY")
+# Seconds per call over 3 runs: averages, and medians on a real Greenhouse form for the last two:
+#   chat reply                low 2.0   medium 3.1    high 6.3
+#   chat turn with the tree   low 4.7   medium 13.5   high 29.1
+#   page-change patch         low 1.9   medium 11.1   high 24.2
+#   task representation       low 28    medium 52     high 293 (over the panel's 240s timeout)
+#   widget                    low 20    medium 71     high 156
+# A higher level is used only when it costs little extra time, and no step up here does. Chat stays
+# low: on average medium is over twice as slow, since its turns that build the tree take 3 times as long.
+THINKING_LEVELS = {
+    "chat": "low",
+    "task_representation": "medium",
+    "webpage_interface": "medium",
+    "task_patch": "low",
+}
+DEFAULT_THINKING_LEVEL = "medium"
+
+
+class ModelError(Exception):
+    """No model is configured, or a model call failed. The API turns it into an error the panel shows."""
+
+
+# ****************************************************************************************************
+# Clients
+# ****************************************************************************************************
+
+def _client_for(key_name: str, model: str | None) -> tuple[AsyncAnthropic | genai.Client, str]:
+    api_key = os.getenv(key_name)
     if not api_key or not model:
-        return None, None
-    return AsyncAnthropic(api_key=api_key), model
+        raise ModelError(f"No model is configured: set {key_name} and the model name in backend/.env.")
+    client = genai.Client(api_key=api_key) if key_name == "GEMINI_API_KEY" else AsyncAnthropic(api_key=api_key)
+    return client, model
 
 
-def _gemini_client_and_model(model: str | None) -> tuple[genai.Client | None, str | None]:
-    api_key = os.getenv("GEMINI_API_KEY")
-    if not api_key or not model:
-        return None, None
-    return genai.Client(api_key=api_key), model
-
-
-def get_client_and_model() -> tuple[AsyncAnthropic | genai.Client | None, str | None]:
+def get_client_and_model() -> tuple[AsyncAnthropic | genai.Client, str]:
     if PROVIDER == "gemini":
-        return _gemini_client_and_model(os.getenv("GEMINI_MODEL"))
-    return _anthropic_client_and_model(os.getenv("ANTHROPIC_MODEL"))
+        return _client_for("GEMINI_API_KEY", os.getenv("GEMINI_MODEL"))
+    return _client_for("ANTHROPIC_API_KEY", os.getenv("ANTHROPIC_MODEL"))
 
 
-def get_fast_client_and_model() -> tuple[AsyncAnthropic | genai.Client | None, str | None]:
-    """A smaller/faster model for cheap incremental work (e.g. patching a task representation with one
-    newly-revealed field). Falls back to the main model when the FAST variant isn't set."""
+# A faster model for page-change patches, falling back to the main model when unset.
+def get_fast_client_and_model() -> tuple[AsyncAnthropic | genai.Client, str]:
     if PROVIDER == "gemini":
-        return _gemini_client_and_model(os.getenv("GEMINI_MODEL_FAST") or os.getenv("GEMINI_MODEL"))
-    return _anthropic_client_and_model(os.getenv("ANTHROPIC_MODEL_FAST") or os.getenv("ANTHROPIC_MODEL"))
+        return _client_for("GEMINI_API_KEY", os.getenv("GEMINI_MODEL_FAST") or os.getenv("GEMINI_MODEL"))
+    return _client_for("ANTHROPIC_API_KEY", os.getenv("ANTHROPIC_MODEL_FAST") or os.getenv("ANTHROPIC_MODEL"))
 
 
-# --- Unified response shape (only the Gemini branch needs to build one) -----------------------
+# ****************************************************************************************************
+# One response shape for both providers
+# ****************************************************************************************************
 
+# Anthropic's own Message already has this shape; Gemini responses are translated into it.
 @dataclass
 class ToolUseBlock:
     type: str
     id: str
     name: str
     input: dict[str, Any]
-    # Gemini 3 ties a function call to the model's internal reasoning state and rejects (400) any
-    # later turn that replays the call without echoing this back — same idea as Claude's thinking
-    # blocks needing to be sent back unchanged. Always None on the Anthropic branch's native blocks
-    # (plain SDK objects with no such attribute); getattr(..., None) at every read site handles that.
+    # Gemini rejects a later turn that replays this call without its thought signature.
     thought_signature: bytes | None = None
 
 
@@ -88,20 +98,26 @@ class LLMMessage:
     stop_reason: str | None = None
 
 
-# --- create_message: dispatches on the client's provider --------------------------------------
+# ****************************************************************************************************
+# Sending a message
+# ****************************************************************************************************
 
+# Sends one request to whichever provider the client belongs to.
 async def create_message(client: AsyncAnthropic | genai.Client, **kwargs: Any):
-    """messages.create via the streaming API (Anthropic) or generate_content (Gemini), returning an
-    object with `.content` (blocks with `.type`, `.id`/`.name`/`.input` for tool_use) and
-    `.stop_reason` — the same shape regardless of provider."""
     if isinstance(client, AsyncAnthropic):
-        kwargs.pop("thinking_level", None)
-        async with client.messages.stream(**kwargs) as stream:
-            return await stream.get_final_message()
-    return await _gemini_create_message(client, **kwargs)
+        return await anthropic_create_message(client, **kwargs)
+    return await gemini_create_message(client, **kwargs)
 
 
-async def _gemini_create_message(
+# Anthropic, through the streaming API (required for large max_tokens).
+async def anthropic_create_message(client: AsyncAnthropic, **kwargs: Any):
+    kwargs.pop("thinking_level", None)
+    async with client.messages.stream(**kwargs) as stream:
+        return await stream.get_final_message()
+
+
+# Gemini, translated to and from the Anthropic-shaped messages the rest of the code uses.
+async def gemini_create_message(
     client: genai.Client,
     *,
     model: str,
@@ -118,7 +134,7 @@ async def _gemini_create_message(
             genai_types.FunctionDeclaration(
                 name=tool["name"],
                 description=tool.get("description", ""),
-                parameters_json_schema=tool["input_schema"],  # raw JSON Schema — no lossy conversion
+                parameters_json_schema=tool["input_schema"],
             )
             for tool in tools
         ])]
@@ -139,22 +155,13 @@ async def _gemini_create_message(
             max_output_tokens=max_tokens,
             tools=gemini_tools,
             tool_config=tool_config,
-            # Gemini 3 defaults to thinking_level="high" when unset. Measured on a real Greenhouse form
-            # (median of 3): high took 293s to build the task representation (over the panel's 240s
-            # timeout every time) and 156s to build the widget, vs. 52s / 71s at "medium", with no
-            # coverage gain — so "medium" is the default, and a caller can ask for less per call.
             thinking_config=genai_types.ThinkingConfig(thinking_level=thinking_level or DEFAULT_THINKING_LEVEL),
         ),
     )
     return _from_gemini_response(response)
 
 
-# --- Translation: our Anthropic-shaped `messages` list <-> Gemini Content/Part ----------------
-# Every call site in this repo already builds `messages` as plain strings or Anthropic tool_use /
-# tool_result blocks (see call_structured_tool's retry loop below) — that shape is this module's
-# internal lingua franca, not something tied to the Anthropic SDK, so the Gemini branch just has to
-# translate it both ways.
-
+# Plain-text and tool_use / tool_result messages -> Gemini contents.
 def _to_gemini_contents(messages: list[dict[str, Any]]) -> list[genai_types.Content]:
     contents: list[genai_types.Content] = []
     last_tool_name: str | None = None
@@ -180,6 +187,7 @@ def _to_gemini_contents(messages: list[dict[str, Any]]) -> list[genai_types.Cont
     return contents
 
 
+# A Gemini response -> the shared LLMMessage shape.
 def _from_gemini_response(response: Any) -> LLMMessage:
     candidate = response.candidates[0] if response.candidates else None
     blocks: list[ToolUseBlock | TextBlock] = []
@@ -197,8 +205,12 @@ def _from_gemini_response(response: Any) -> LLMMessage:
     return LLMMessage(content=blocks, stop_reason=stop_reason)
 
 
-# --- Forced tool call + validate/retry loop — provider-agnostic -------------------------------
+# ****************************************************************************************************
+# Structured calls: force one tool, validate its input, retry with the error
+# ****************************************************************************************************
 
+# Forces `tool` and returns `validate(input)`. A rejected input is sent back with its error, up to
+# max_retries more times. Raises ModelError when there's no result or no valid one.
 async def call_structured_tool(
     *,
     client: AsyncAnthropic | genai.Client,
@@ -211,38 +223,34 @@ async def call_structured_tool(
     label: str,
     max_retries: int = 2,
     thinking_level: str | None = None,
-) -> Any | None:
-    """Force `tool`, then validate its input with `validate` (which must raise on bad data).
-
-    On a validation failure the exact error is fed back as an `is_error` tool_result and the model is
-    asked to call the tool again — up to `max_retries` extra times. Returns whatever `validate` returns,
-    or None if the model never produced a tool call or never produced valid input.
-    """
+) -> Any:
     tool_name = tool["name"]
     convo: list[dict[str, Any]] = list(messages)
     last_error: Exception | None = None
 
     for _ in range(max_retries + 1):
-        response = await create_message(
-            client,
-            model=model,
-            max_tokens=max_tokens,
-            system=system,
-            tools=[tool],
-            tool_choice={"type": "tool", "name": tool_name},
-            messages=convo,
-            thinking_level=thinking_level,
-        )
+        try:
+            response = await create_message(
+                client,
+                model=model,
+                max_tokens=max_tokens,
+                system=system,
+                tools=[tool],
+                tool_choice={"type": "tool", "name": tool_name},
+                messages=convo,
+                thinking_level=thinking_level,
+            )
+        except Exception as error:
+            raise ModelError(f"The {label} call failed: {error}") from error
         tool_use = next((block for block in response.content if block.type == "tool_use"), None)
         if tool_use is None:
-            print(f"{label}: no tool_use block (stop_reason={response.stop_reason}); using fallback.")
-            return None
+            raise ModelError(f"The {label} call returned no result (stop reason: {response.stop_reason}).")
         try:
             return validate(tool_use.input)
-        except Exception as error:  # bad enum literal, missing field, wrong shape, ...
+        except Exception as error:
             last_error = error
             assistant_block = {"type": "tool_use", "id": tool_use.id, "name": tool_use.name, "input": tool_use.input}
-            thought_signature = getattr(tool_use, "thought_signature", None)  # Gemini only — see ToolUseBlock
+            thought_signature = getattr(tool_use, "thought_signature", None)
             if thought_signature is not None:
                 assistant_block["thought_signature"] = thought_signature
             convo = convo + [
@@ -253,5 +261,4 @@ async def call_structured_tool(
                 ]},
             ]
 
-    print(f"{label}: tool input still invalid after {max_retries} retries ({last_error}); using fallback.")
-    return None
+    raise ModelError(f"The {label} call kept returning invalid results ({last_error}).")

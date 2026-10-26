@@ -1,6 +1,8 @@
-// Chrome extension plumbing for the side panel: the narrow slice of the `chrome.*` API the panel
-// actually uses, and the one-shot request that asks the active tab's content script for its page
-// elements.
+/*
+Extentsion connects the front end and the backend 
+- page-scan gets the elements 
+- the extension then sends these elements to the backend
+*/
 
 // Mirrors lib/page-scan.ts's ScannedElement / ScannedContainer — what the content script sends.
 export type PageElement = {
@@ -15,6 +17,8 @@ export type PageElementsResponse = {
 export type RuntimeMessage = {
   type?: string
   ok?: boolean
+  // a widget error's text, for WIDGET_ERROR
+  message?: string
   event?: {
     type: string; url: string; structural?: boolean
     fieldsAdded?: number; fieldsRemoved?: number
@@ -24,7 +28,7 @@ export type RuntimeMessage = {
   }
 }
 
-type TabInfo = { id?: number; active?: boolean }
+type TabInfo = { id?: number; active?: boolean; windowId?: number }
 export type TabUpdatedListener = (tabId: number, changeInfo: { status?: string; url?: string }, tab: TabInfo) => void
 export type TabActivatedListener = (activeInfo: { tabId: number }) => void
 type WebNavDetails = { tabId: number; frameId: number; url: string }
@@ -34,6 +38,8 @@ export type ExtensionChrome = {
   tabs?: {
     query: (options: object, callback: (tabs: TabInfo[]) => void) => void
     sendMessage: (tabId: number, message: object, callback?: (response?: PageElementsResponse) => void) => void
+    // the visible area of a window's active tab, as an image data URL
+    captureVisibleTab?: (windowId: number, options: { format: 'png' | 'jpeg'; quality?: number }) => Promise<string>
     onUpdated?: { addListener: (listener: TabUpdatedListener) => void; removeListener: (listener: TabUpdatedListener) => void }
     onActivated?: { addListener: (listener: TabActivatedListener) => void; removeListener: (listener: TabActivatedListener) => void }
   }

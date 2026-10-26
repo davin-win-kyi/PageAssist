@@ -10,7 +10,7 @@ for (const k of ['window', 'document', 'Element', 'Node', 'HTMLElement', 'Shadow
 }
 (globalThis as Record<string, unknown>).CSS = { escape: (s: string) => String(s).replace(/[^\w-]/g, (c) => `\\${c}`) };
 
-const { describeMutation } = await import('../../plugin/lib/mutations.ts');
+const { describeMutation, changedOutsideInterface } = await import('../../plugin/lib/mutations.ts');
 
 let pass = 0, fail = 0;
 function check(name: string, got: unknown, want: unknown) {
@@ -75,6 +75,15 @@ console.log('\n== mutation targets that are not elements ==');
   check('a shadow root -> its host element', describe({ target: { nodeType: 11, host } }).targetSelector, '#host');
   const bare = page('<section><span>x</span></section>').querySelector('section');
   check('an element with nothing unique gets a stamp, never a bare tag', isBareTag(describe({ target: bare }).targetSelector!), false);
+}
+
+console.log('\n== only changes outside the widget count ==');
+{
+  const doc = page('<iframe data-pageassist-interface="true"></iframe><div id="layer" data-pageassist-interface="drag-layer"></div><input id="q" />');
+  const fake = (o: Partial<Fake>) => ({ type: 'childList', target: doc.body, addedNodes: [], removedNodes: [], attributeName: null, oldValue: null, ...o }) as unknown as MutationRecord;
+  check('adding the drag layer is not a page change', changedOutsideInterface([fake({ addedNodes: [doc.querySelector('#layer')] })]), false);
+  check('a data-tw-ref stamp is not a page change', changedOutsideInterface([fake({ type: 'attributes', target: doc.querySelector('#q'), attributeName: 'data-tw-ref' })]), false);
+  check('a page attribute change is', changedOutsideInterface([fake({ type: 'attributes', target: doc.querySelector('#q'), attributeName: 'value' })]), true);
 }
 
 console.log(`\n== RESULT ==\n  ${pass} passed, ${fail} failed`);

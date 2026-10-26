@@ -1,5 +1,5 @@
-"""Cross-cutting helpers with no domain logic and no routes:
-- json_store.py : the shared JSON load/dump + the data/ directory
-- llm.py        : Anthropic client, streaming create, forced-tool-use + validation loop
-- debuglog.py   : best-effort append-only JSONL logs under data/ (e.g. chat_log.jsonl)
+"""
+Util methods shared by the endpoints, with no routes of their own
+- json_store.py: loading and saving the JSON files in data/
+- llm.py: the model calls
 """

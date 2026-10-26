@@ -9,7 +9,7 @@ for (const k of ['window', 'document', 'Element', 'Node', 'HTMLElement'] as cons
 }
 (globalThis as Record<string, unknown>).CSS = { escape: (s: string) => String(s).replace(/[^\w-]/g, (c) => `\\${c}`) };
 
-const { computeAccessibleName, computeAccessibleDescription } = await import('../../plugin/lib/selectors.ts');
+const { computeAccessibleName, computeAccessibleDescription, stableSelector } = await import('../../plugin/lib/selectors.ts');
 
 let pass = 0, fail = 0;
 function check(name: string, got: unknown, want: unknown) {
@@ -44,6 +44,35 @@ check('a long heading comes back in full', name(`<h3 id="h">${longQuestion}</h3>
 const longHelp = `${longQuestion}. Please keep it under 500 words and focus on your own contribution rather than the team's.`;
 check(`a ${longHelp.length}-character description comes back in full`,
   computeAccessibleDescription(el(`<textarea id="q" aria-describedby="help"></textarea><p id="help">${longHelp}</p>`, '#q')), longHelp);
+
+console.log('\n== stable selectors are unique ==');
+{
+  const doc = parseHTML(`<!doctype html><html><body>
+    <fieldset id="work"><input type="radio" name="remote" value="yes" /><input type="radio" name="remote" value="no" /></fieldset>
+    <div id="a"><input name="school" /></div><div id="b"><input name="school" /></div>
+    <span id="dup">One</span><span id="dup">Two</span></body></html>`).document;
+  const unique = (selector: string) => doc.querySelectorAll(selector).length === 1;
+  const [yes, no] = [...doc.querySelectorAll('input[name="remote"]')];
+  const radios = [stableSelector(yes), stableSelector(no)];
+  check('radios sharing a name are told apart by their value', radios.every(unique) && radios[0] !== radios[1], true);
+  check('  without a stamp', radios.some((s) => s.startsWith('[data-tw-ref=')), false);
+  const [s1, s2] = [...doc.querySelectorAll('input[name="school"]')].map(stableSelector);
+  check('look-alike inputs are scoped under a uniquely identified ancestor', [s1, s2].every(unique) && s1 !== s2, true);
+  const dupes = [...doc.querySelectorAll('span')].map(stableSelector);
+  check('elements sharing an id are never given that id', dupes.every(unique) && !dupes.includes('#dup'), true);
+}
+
+console.log('\n== selectors that keep working ==');
+{
+  const doc = parseHTML(`<!doctype html><html><body>
+    <div id="a"><input name="school" value="MIT" /></div><div id="b"><input name="school" value="" /></div>
+    <section id="phone-field"><input /></section></body></html>`).document;
+  const [typed] = [...doc.querySelectorAll('input[name="school"]')].map(stableSelector);
+  check('a text field is never told apart by its value attribute, which changes as the user types', typed.includes('value='), false);
+  check('  it is scoped under its uniquely identified wrapper instead', typed, '#a input[name="school"]');
+  const bare = stableSelector(doc.querySelector('#phone-field input')!);
+  check('a field with no attributes is scoped by its tag under a unique wrapper, not stamped', bare, '#phone-field input');
+}
 
 console.log(`\n== RESULT ==\n  ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

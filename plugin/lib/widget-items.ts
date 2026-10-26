@@ -1,12 +1,13 @@
-import { computeAccessibleName } from './selectors.ts';
-
 /*
-Helpers for the items in a widget's state — what content.ts keeps live on the page:
+The following file has the helpers for the items in a widget's state, which content.ts keeps
+live on the page
 - which page elements an item tracks
 - whether the page marks an item's question as required
-- splicing questions the page added or removed into a widget that's already showing, so a page change
-  doesn't have to regenerate the whole widget
+- splicing questions the page added or removed into a widget that is already showing, so a page
+  change does not have to generate the whole widget again
 */
+
+import { computeAccessibleName } from './selectors.ts';
 
 export type WidgetItem = {
   selector?: string;
@@ -26,12 +27,18 @@ export function itemSelectors(item: WidgetItem): string[] {
   return typeof item.selector === 'string' ? [item.selector] : [];
 }
 
-////////////////////////////////////////////////////////// Required
+/*************************************************************************************************
+Required questions
+*************************************************************************************************/
 
-// "First Name*", "Email (required)"
+/*
+Marks that label a question as required, like "*" or "(required)"
+*/
 const REQUIRED_MARK_RE = /\*|\(required\)/i;
 
-// the label of the question a control sits in: a fieldset's legend, or a group's own name
+/*
+The name of the question group around an element, which may carry the required mark
+*/
 function questionGroupName(element: Element): string {
   const group = element.closest('fieldset, [role="group"], [role="radiogroup"]');
   if (!group) return '';
@@ -40,12 +47,8 @@ function questionGroupName(element: Element): string {
 }
 
 /*
-Whether the page marks this element's question as required, in order:
-- the element's own `required` / `aria-required` (aria-required="false" is a clear no)
-- a radio or checkbox group where any option is `required`
-- the nearest wrapper carrying `aria-required` (a file upload's role="group")
-- an asterisk or "(required)" in the element's own label or its question's label
-- for a wrapper element: a required control inside it
+Whether the page marks an element as required: its attributes, its radio or checkbox group, a
+wrapper, or a required mark in its name or its group's name
 */
 export function isElementRequired(element: Element): boolean {
   if (element.hasAttribute('required')) return true;
@@ -67,11 +70,10 @@ export function isElementRequired(element: Element): boolean {
   return !!element.querySelector('[required], [aria-required="true"]');
 }
 
-// Members of a multi-control question that can never be filled. Its selectors can include text the
-// backend took for a control: Greenhouse's resume question carries its "Accepted file types: …" line
-// (id "accepted-filetypes"), which would hold the item incomplete forever. Judged while the question's
-// elements are on the page (content.ts settles them when a widget is applied): a member that's there but
-// isn't an answerable control. Never every member — a single selector, or all of them, are left alone.
+/*
+The members of an item that can't be answered (a line of text bundled in), left out of its
+completion
+*/
 export function nonAnswerMembers(selectors: string[], resolve: (selector: string) => Element | null): string[] {
   if (selectors.length < 2) return [];
   const excluded = selectors.filter((selector) => {
@@ -81,7 +83,9 @@ export function nonAnswerMembers(selectors: string[], resolve: (selector: string
   return excluded.length < selectors.length ? excluded : [];
 }
 
-// an item's question is required when any control it tracks is
+/*
+Whether any element an item tracks is required
+*/
 export function isItemRequired(selectors: string[], resolve: (selector: string) => Element | null): boolean {
   return selectors.some((selector) => {
     const element = resolve(selector);
@@ -89,7 +93,9 @@ export function isItemRequired(selectors: string[], resolve: (selector: string) 
   });
 }
 
-////////////////////////////////////////////////////////// Splicing a page change into a live widget
+/*************************************************************************************************
+Splicing a page change into a live widget
+*************************************************************************************************/
 
 const ANSWER_ROLES = '[role="combobox"], [role="radiogroup"], [role="radio"], [role="checkbox"], [role="switch"], [role="listbox"], [role="textbox"], [role="spinbutton"], [role="slider"]';
 const NON_ANSWER_INPUT_TYPES = new Set(['hidden', 'submit', 'button', 'reset', 'image']);

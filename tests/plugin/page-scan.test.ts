@@ -26,7 +26,7 @@ function loadPage(html: string) {
   return dom.document;
 }
 
-const { scanPage, containersReferencedBy } = await import('../../plugin/lib/page-scan.ts');
+const { scanPage, containersReferencedBy, isElementVisible, isInTransientLayer } = await import('../../plugin/lib/page-scan.ts');
 const scan = (html: string) => { const doc = loadPage(html); return { doc, ...scanPage() }; };
 
 console.log('== what gets collected ==');
@@ -149,7 +149,9 @@ console.log('\n== selectors and ids stay stable ==');
     <div class="entry"><label>School <input type="text" name="school" /></label></div>`);
   const schools = () => scanPage().elements.filter((e) => e.tag === 'input').map((e) => e.selector);
   const [a, b] = schools();
-  check('the first name="school" keeps its natural selector, the second is stamped', [a, b.startsWith('[data-tw-ref=')], ['input[name="school"]', true]);
+  check('two inputs sharing name="school" each get a selector that matches only itself',
+    [a, b].map((selector) => page.querySelectorAll(selector).length), [1, 1]);
+  check('  and the two selectors differ', a !== b, true);
   page.querySelector('.entry')!.remove();
   check('the stamp sticks once the first entry is removed (no identity churn)', schools(), [b]);
 }
@@ -197,6 +199,84 @@ console.log('\n== a popup-looking class on the page itself is not a popup ==');
   const wrapped = scan(`<div id="page" class="site menu-open"><main><h1 id="t">Apply</h1><input id="name" /></main></div>`).elements;
   check('a "menu-open" wrapper around the main content is not a popup either',
     [wrapped.some((e) => e.selector === '#t'), wrapped.some((e) => e.selector === '#name')], [true, true]);
+}
+
+console.log('\n== other ways an element is hidden ==');
+{
+  // linkedom has no computed style; read opacity and display from inline styles
+  const styled = (html: string) => {
+    const doc = loadPage(html);
+    (doc.defaultView as unknown as { getComputedStyle: (e: Element) => object }).getComputedStyle = (e: Element) => {
+      const inline = e.getAttribute('style') || '';
+      return { display: 'block', visibility: 'visible', opacity: /opacity\s*:\s*0(?![.\d])/.test(inline) ? '0' : '1' };
+    };
+    return doc;
+  };
+  const doc = styled(`<div id="faded" style="opacity:0"><p id="inside">Hidden text</p></div>
+    <p id="own" style="opacity:0">Own opacity</p>
+    <label class="pretty-radio"><input type="radio" id="styled" name="r" style="opacity:0" /> Yes</label>
+    <div inert><input id="inert-field" /></div>
+    <p id="shown">Shown</p>`);
+  const visible = (id: string) => isElementVisible(doc.getElementById(id)!);
+  check('text inside an opacity:0 container is hidden', visible('inside'), false);
+  check('an element with opacity:0 itself is hidden', visible('own'), false);
+  check('a styled radio whose native input is opacity:0 still counts as shown', visible('styled'), true);
+  check('a field inside an inert region is hidden', visible('inert-field'), false);
+  check('an ordinary element is shown', visible('shown'), true);
+}
+
+console.log('\n== popups found through the open control that points at them ==');
+{
+  const doc = loadPage(`<label for="city">City</label>
+    <input id="city" role="combobox" aria-expanded="true" aria-controls="city-results" />
+    <div id="city-results"><div><input type="checkbox" id="opt-a" /> Seattle</div></div>
+    <button aria-expanded="true" aria-controls="more-qs">More questions</button>
+    <section id="more-qs"><input id="extra" /></section>`);
+  check('an option list an open combobox controls is temporary', isInTransientLayer(doc.getElementById('opt-a')!), true);
+  check('a section a plain disclosure button expands is not temporary', isInTransientLayer(doc.getElementById('extra')!), false);
+}
+
+console.log('\n== popup names that a field itself also uses ==');
+{
+  const doc = loadPage(`<div class="select-wrapper"><input id="mz" class="select-dropdown dropdown-trigger" type="text" readonly value="Choose your option" />
+    <ul class="dropdown-content select-dropdown"><li><span id="mz-opt">Option 1</span></li></ul></div>
+    <div class="v-overlay v-dialog" role="dialog"><div class="v-overlay__content"><input id="in-dialog" /></div></div>`);
+  check('a Materialize select\'s visible input is a field, not a popup', isInTransientLayer(doc.getElementById('mz')!), false);
+  check('  while its open option list is a popup', isInTransientLayer(doc.getElementById('mz-opt')!), true);
+  check('a question inside a Vuetify dialog is not in a popup', isInTransientLayer(doc.getElementById('in-dialog')!), false);
+}
+
+console.log('\n== a fixed element escapes a collapsed container ==');
+{
+  const doc = loadPage(`<div id="collapsed" style="overflow:hidden"><p id="clipped">Clipped</p>
+    <div id="modal" style="position:fixed"><p id="inside-fixed">Shown</p></div></div>`);
+  (doc.defaultView as unknown as { getComputedStyle: (e: Element) => object }).getComputedStyle = (e: Element) => {
+    const inline = e.getAttribute('style') || '';
+    return { display: 'block', visibility: 'visible', opacity: '1',
+      overflow: /overflow\s*:\s*hidden/.test(inline) ? 'hidden' : 'visible',
+      position: /position\s*:\s*fixed/.test(inline) ? 'fixed' : 'static' };
+  };
+  Object.defineProperty(doc.getElementById('collapsed')!, 'offsetHeight', { value: 0 });
+  check('text in a zero-height container that clips is hidden', isElementVisible(doc.getElementById('clipped')!), false);
+  check('  a fixed element inside it is shown, since it escapes the clipping', isElementVisible(doc.getElementById('modal')!), true);
+  check('  and so is what the fixed element holds', isElementVisible(doc.getElementById('inside-fixed')!), true);
+}
+
+console.log('\n== fields no one can reach are not questions ==');
+{
+  const doc = loadPage(`<form><input id="trap" aria-label="Do not fill out this field" tabindex="-1" type="text" name="website" />
+    <input id="email" aria-label="Your Email..." type="email" />
+    <label class="pretty"><input id="radio" type="radio" name="r" /> Yes</label></form>`);
+  const at = (left: number) => () => ({ left, right: left + 9, top: 10, bottom: 17, width: 9, height: 7 });
+  Object.defineProperty(doc.getElementById('trap')!, 'getBoundingClientRect', { value: at(-99867) });
+  Object.defineProperty(doc.getElementById('radio')!, 'getBoundingClientRect', { value: at(-9999) });
+  check('a field moved far off the page and out of the tab order is hidden', isElementVisible(doc.getElementById('trap')!), false);
+  check('  an ordinary field is shown', isElementVisible(doc.getElementById('email')!), true);
+  check('  a visually hidden native radio still in the tab order is shown', isElementVisible(doc.getElementById('radio')!), true);
+  const select = loadPage(`<div class="select__container"><input id="country" role="combobox" />
+    <input id="required-helper" required tabindex="-1" aria-hidden="true" class="requiredInput" value="" /></div>`);
+  check('a dropdown\'s hidden validation input is hidden too', isElementVisible(select.getElementById('required-helper')!), false);
+  check('  while the dropdown itself is shown', isElementVisible(select.getElementById('country')!), true);
 }
 
 console.log(`\n== RESULT ==\n  ${pass} passed, ${fail} failed`);

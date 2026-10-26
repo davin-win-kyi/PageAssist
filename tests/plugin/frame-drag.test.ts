@@ -8,6 +8,7 @@ import { parseHTML } from 'linkedom';
 
 const { document } = parseHTML('<!doctype html><html><body></body></html>');
 const { startFrameDrag } = await import('../../plugin/lib/frame-drag.ts');
+const { createInterfaceFrame } = await import('../../plugin/lib/interface-frame.ts');
 
 let pass = 0, fail = 0;
 function check(name: string, got: unknown, want: unknown) {
@@ -48,6 +49,34 @@ console.log('\n== the layer never outlives the drag ==');
   layer()!.dispatchEvent(pointer('pointercancel'));
   check('a cancelled pointer ends it too', !!layer(), false);
   drag.end();
+}
+
+console.log('\n== the frame module places, sizes and moves the frame ==');
+{
+  const frames = createInterfaceFrame(document);
+  const frame = frames.create();
+  frame.getBoundingClientRect = () => ({ left: 100, top: 50 }) as DOMRect;
+  frames.place(frame, {});
+  check('docked bottom-right at a readable size by default', [frame.style.bottom, frame.style.right, frame.style.width], ['20px', '20px', '300px']);
+  frames.handleMessage(frame, { type: 'resize', height: 200 });
+  check('fits the height the widget reports', frame.style.height, '208px');
+  frames.handleMessage(frame, { type: 'setHeight', height: 90 });
+  frames.handleMessage(frame, { type: 'resize', height: 400 });
+  check('a pinned height ignores later resizes', frame.style.height, '90px');
+  frames.handleMessage(frame, { type: 'dragStart', screenX: 10, screenY: 10 });
+  check('a drag start covers the page with the drag layer', !!layer(), true);
+  layer()!.dispatchEvent(pointer('pointermove', 30, 25));
+  layer()!.dispatchEvent(pointer('pointerup', 30, 25, 0));
+  check('a drag moves it by the pointer delta, from the layer alone', [frame.style.left, frame.style.top, frame.style.right], ['120px', '65px', '']);
+  check('  and the layer comes down on release', !!layer(), false);
+  frames.handleMessage(frame, { type: 'dragStart', screenX: 0, screenY: 0 });
+  frames.handleMessage(frame, { type: 'dragEnd' });
+  check('a release the sandbox saw first also ends the drag', !!layer(), false);
+  frames.place(frame, {});
+  check('  and a later update keeps it where it was dragged', [frame.style.right, frame.style.bottom], ['', '']);
+  check('other messages are left to content.ts', frames.handleMessage(frame, { type: 'close' }), false);
+  frames.place(frame, { top: '10px', left: '10px' });
+  check('a position the widget asks for replaces the dragged one', [frame.style.top, frame.style.left, frame.style.bottom, frame.style.right], ['10px', '10px', '', '']);
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);

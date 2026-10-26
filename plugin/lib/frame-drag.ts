@@ -1,14 +1,13 @@
 /*
-Dragging the widget's frame. The widget's handle calls window.pageassist.startDrag(event) on pointerdown
-(entrypoints/sandbox/main.ts), which reports where the pointer is; from then on the host follows the
-pointer and moves the frame — the widget does no drag math of its own.
-
-- An isolated (out-of-process) iframe stops receiving pointer events once the pointer leaves it, so a
-  fast flick would drop the drag. For the drag's duration the host covers the page with a transparent
-  layer that catches the pointer wherever it goes.
-- Positions are screenX/screenY: clientX/clientY shift as the frame moves under the pointer.
-- Every move is measured from one last-known position, whichever side (the layer, or the widget
-  forwarding its own events) saw the pointer last, so nothing is counted twice.
+Frame dragging logic nessecary for the frame to move on top of the
+webpage
+- the file on the page does the moving 
+- with the invisible layer the dragging does not become faulty to fast drags 
+  and instead of having the drag go to the bottom as before, the invisible layer
+  prevents that from happening, where the drag goes to the page instead of the 
+  widget 
+- tracks the pointer on the screen and not within the page 
+  (if within the page than the widget would jitter)
 */
 
 export type FrameDrag = {
@@ -26,7 +25,8 @@ export function startFrameDrag(
   let last = { x: screenX, y: screenY };
   let ended = false;
   const layer = doc.createElement('div');
-  layer.setAttribute('data-pageassist-interface', 'drag-layer'); // not page content: the observer skips it
+  // not page content, so the observer skips it
+  layer.setAttribute('data-pageassist-interface', 'drag-layer');
   layer.style.cssText = 'position:fixed;inset:0;z-index:2147483647;cursor:move;background:transparent;touch-action:none;';
 
   const drag: FrameDrag = {

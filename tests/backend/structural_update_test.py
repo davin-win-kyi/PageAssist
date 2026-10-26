@@ -10,8 +10,7 @@ This exercises the backend half of App.tsx's processStructuralChange: /analyze m
 stored task representation, and /generate must read that fresh copy (not a cached one).
 
 Run (from repo root):  PYTHONPATH=backend backend/.venv/bin/python tests/backend/structural_update_test.py
-No ANTHROPIC_MODEL -> deterministic fallback path (one component per control); the plumbing
-assertions hold either way.
+Needs a configured model in backend/.env; without one the calls return an error.
 """
 import os
 import sys
@@ -193,11 +192,6 @@ w_padded = generate()
 padded_items = item_selectors(w_padded)
 print(f"  padded widget: {len(padded_items)} items; #race present: {'#race' in padded_items}")
 check("the newly revealed 28th control is in the widget on a long form", "#race" in padded_items)
-if w_padded.get("degraded"):  # the model-free widget, built by components_to_items
-    n_components = len(c.get(f"/task-representations/{SITE}").json()["components"])
-    check("the fallback widget lists every component — no item cap",
-          len(w_padded["state"]["items"]) == n_components,
-          f"{len(w_padded['state']['items'])} items for {n_components} components")
 
 print("\n== 5. a REVEALED question (in the DOM all along, hidden, now visible) ==")
 # content.ts sends these grouped per question; the backend adds one only if nothing of it is mapped.
@@ -216,12 +210,12 @@ vet = [{"id": f"vet-{v}", "selector": f"#vet-{v}", "tag": "input", "text": "", "
         "accessibleName": v.capitalize(), "visible": True} for v in ("yes", "no", "decline")]
 # The group is mapped via ONE option — put straight into the stored representation, not via a patch:
 # whether the model models a lone, unlabelled "Yes" radio is its judgment call, and this check is about
-# the deterministic already-mapped rule (_unmapped_revealed), not that call.
+# the deterministic already-mapped rule (unmapped_revealed), not that call.
 from api.state.task import task_store, replace_task_store
 _rep = c.get(f"/task-representations/{SITE}").json()
-_rep["components"].append({"component_id": "c900", "component_type": "single-choice-question", "semantic_role": "veteran-status",
+_rep["components"].append({"component_id": "c900", "component_type": "single-choice-question",
                            "label": "Veteran status", "description": "", "dom_selector": "#vet-yes", "member_selectors": ["#vet-yes"],
-                           "associated_task_ids": [], "required_for_task": "unknown", "importance": "supporting"})
+                           "associated_task_ids": []})
 replace_task_store(task_store["site_id"], _rep, task_store.get("page_text", ""))
 n_mapped = len(_rep["components"])
 r = c.post(f"/task-representations/{SITE}/patch", json={"revealed": [vet]})

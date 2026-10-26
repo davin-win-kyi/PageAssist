@@ -1,1 +1,6 @@
-"""In-process state: the task slot, the interface working-tree + saved DB, the in-memory widget."""
+"""
+The stored state of the backend
+- task.py: the current page's task representation
+- interface_representation.py: the working tree and the saved database
+- webpage_interface.py: the widget, kept in memory only
+"""

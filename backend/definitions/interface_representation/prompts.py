@@ -1,7 +1,6 @@
 """
-Interface representation prompts — the rules for the page-agnostic tree the chat builds. One copy,
-used by the /chat prompt (definitions/chat/prompts.py) and the tree-repair call
-(api/endpoints/chat/router.py _repair_interface_tree).
+The rules for the interface representation, the page-agnostic tree the chat builds
+- shared by the chat prompt (definitions/chat) and the tree repair prompt (definitions/repair)
 """
 
 INTERFACE_REPRESENTATION_RULES = """\
@@ -10,27 +9,19 @@ A tree of the user's preferences for their support interface. It is page-agnosti
 specific page's fields, text, counts or layout. A later step applies it to the page they're on.
 
 Each node is {"component", "description", "style", "preferences", "children"}:
-- component: a short slug for what the support is, e.g. "checklist", "progress-bar". "" until a
-  strategy is picked.
-- description: one sentence on what the support does. Root node only.
-- style: CSS properties and values the user asked for, e.g. {"background-color": "#fff8f0"}.
-- preferences: short phrases for what the node shows or how it behaves, e.g. "shows each field's
-  completion". Never page-specific text, counts, selectors, ids, classes, colors or true/false.
-- children: generic parts of the support. For a list, ONE child like "a checklist of relevant
-  fields", never one child per page item.
+- component: a short slug naming what the support is. "" until a strategy is picked.
+- description: what the support does and how it helps, in plain sentences. Root node only.
+- style: CSS properties and values the user asked for.
+- preferences: short phrases for what the node shows or how it behaves. Never page-specific text,
+  counts, selectors, ids, classes, colors or true/false. They are reused on other kinds of pages, so
+  name the parts of the user's task in general terms rather than one kind of page's own terms.
+- children: generic parts of the support. Items from the page are never children: a list of them is
+  one generic child, whatever the page holds.
 
 Rules:
 - Add only what the user asked for or clearly implied.
-- Default: a plain static panel. Add no feature beyond that (dragging, collapsing, resizing, closing,
-  animation, extra controls or anything else) unless the user asks for it.
+- Default: a plain static panel. Add no feature beyond that unless the user asks for it.
 - Position: docked bottom-right at a readable size. Set position or size only if the user asks.
 - Completion: the interface tracks completion of real page fields itself. Never put checked or done
   state in the tree.
 """
-
-# System prompt for the tree-repair call: build or edit just the tree, from what the chat already said.
-INTERFACE_REPRESENTATION_GUIDE = f"""\
-# ROLE
-You build or edit PageAssist's interface representation from a conversation turn.
-
-{INTERFACE_REPRESENTATION_RULES}"""

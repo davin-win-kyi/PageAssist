@@ -1,5 +1,7 @@
 """
-Task representation related schemas
+The schemas for the task representation: the analyze request (the page scan), the model's output,
+and its tool
+- the patch reuses these in definitions/patch
 """
 
 from __future__ import annotations
@@ -8,112 +10,113 @@ from typing import Literal
 from pydantic import BaseModel, model_validator
 
 
-# --- Request -------------------------------------------------------------------------------------
+# ****************************************************************************************************
+# Request: the page scan (mirrors ScannedElement / ScannedContainer in plugin/lib/page-scan.ts)
+# ****************************************************************************************************
 
 class PageElement(BaseModel):
-    """One pruned, accessibility-tree-like node from the client's page snapshot (plugin/lib/page-scan.ts)."""
+    """One scanned element of the page."""
 
-    id: str                      # its own HTML id, else its selector — never its position
+    # its HTML id, else its selector (never its position)
+    id: str
     selector: str
     tag: str
+    # its text, cut to 120 characters
     text: str
-    role: str = ""               # explicit role=, else inferred from tag/input-type by content.ts
-    accessibleName: str = ""     # aria-label → aria-labelledby → alt → associated <label> → placeholder → title
-    description: str = ""        # help text / hint / validation message (aria-describedby, aria-errormessage)
-    completion_status: str = ""  # "complete" / "incomplete" for answerable controls as of the scan, else ""
-    container: str = ""          # selector of its nearest ContextContainer, "" when none
+    # explicit role, else inferred from the tag
+    role: str = ""
+    # its label, the way a screen reader reads it
+    accessibleName: str = ""
+    # its help text, hint or validation message
+    description: str = ""
+    # "complete" / "incomplete" for a control as of the scan, else ""
+    completion_status: str = ""
+    # selector of the container it sits in, "" if none
+    container: str = ""
     visible: bool = True
 
 
 class ContextContainer(BaseModel):
-    """A structural grouping elements sit in (form, fieldset, list, table row, dialog, section…)."""
+    """A group elements sit in: a form, fieldset, list, table row, section or dialog."""
 
     selector: str
     tag: str
     role: str = ""
-    label: str = ""   # legend / caption / summary / figcaption / heading / ARIA name
-    parent: str = ""  # selector of the container this one sits in, "" at top level
+    # its legend, caption, summary or heading
+    label: str = ""
+    # selector of the container it sits in, "" at the top
+    parent: str = ""
 
 
-# How much of a page's readable prose is kept and handed to widget generation (~15k tokens). Generous on
-# purpose: for a tutorial or recipe the prose IS the steps, and anything past the cut can never become an
-# item. Mirrors getPageText's default cap in plugin/lib/page-scan.ts.
+# How much page text is kept for widget generation (~15k tokens). Mirrors getPageText's cap in
+# plugin/lib/page-scan.ts.
 PAGE_TEXT_LIMIT = 60_000
 
 
 class TaskRepresentationRequest(BaseModel):
-    """Body of POST /task-representations/{id}/analyze: the page's URL/title + its element snapshot."""
+    """Body of POST /task-representations/{id}/analyze."""
 
     url: str
     title: str
     elements: list[PageElement]
     containers: list[ContextContainer] = []
-    page_text: str = ""          # the page's readable prose (document.innerText, capped) — used at
-    #                              generation time for content that isn't a form field (recipe steps…)
-    frames: dict[str, int] = {}  # {sameOrigin, crossOrigin} — diagnostic; a form page with only
-    #                              cross-origin frames means the fields are unreachable to the extension
+    # the page's readable text, kept for widget generation
+    page_text: str = ""
+    # {sameOrigin, crossOrigin} iframe counts, logged to explain an empty result
+    frames: dict[str, int] = {}
 
 
-# --- Closed enums ------------------------------------------------------------------------------
-# `task_type` and `semantic_role` are OPEN free strings (short kebab-case) — webpages host more task
-# shapes than a fixed list can name. The rest are closed.
+# ****************************************************************************************************
+# Output: what the build_task_representation tool must return
+# ****************************************************************************************************
 
-Importance = Literal["primary", "supporting", "peripheral"]
-RequiredForTask = Literal["true", "false", "unknown"]
-# What kind of thing a component is — tells widget generation how to treat it: a *-question is answered
-# in a control (a grounded item whose completion the host tracks), a step is done by the user (a manual
-# item), a heading names a section, an action is a button or link that does something.
+# What a component is. A *-question is answered in a control on the page; a step is something the
+# user does; the rest are read or used. The two "other" values catch anything that fits no type.
 ComponentType = Literal[
     "text-question", "long-text-question", "single-choice-question", "multi-choice-question",
-    "toggle-question", "date-question", "file-question",
-    "step", "content", "heading", "action", "navigation", "status", "media",
+    "toggle-question", "date-question", "file-question", "other-question",
+    "step", "content", "heading", "action", "navigation", "status", "media", "other",
 ]
-# source depends_on target: source applies only given an answer to target (a follow-up question).
-# source precedes target: source comes first in the page's own order (numbered steps, a wizard).
-# source alternative_to target: either one satisfies the same need (upload a resume OR enter it).
+
+# depends_on: source applies only given an answer to target. precedes: source comes first in the
+# page's order. alternative_to: either one satisfies the same need.
 RelationshipType = Literal["depends_on", "precedes", "alternative_to"]
 
 
-# --- Output models (validate the model's tool call) -------------------------------------------
-
 class TaskItem(BaseModel):
-    """One coarse, goal-oriented user task. Hierarchy via parent_task_id on a flat list."""
+    """A goal the user comes to the page to do. Sub-goals point at their parent task."""
 
     task_id: str
     label: str
     description: str = ""
-    task_type: str  # short kebab-case label
+    task_type: str
     parent_task_id: str | None = None
     component_ids: list[str] = []
-    importance: Importance = "supporting"
 
 
 class ComponentItem(BaseModel):
-    """One semantic grouping of DOM nodes a user names as one thing. Each form question is its own."""
+    """A unit the user acts on or reads. Each form question is its own component."""
 
     component_id: str
     component_type: ComponentType
-    semantic_role: str  # short kebab-case label
     label: str = ""
     description: str = ""
     dom_selector: str
     member_selectors: list[str] = []
     associated_task_ids: list[str] = []
-    required_for_task: RequiredForTask = "unknown"
-    importance: Importance = "supporting"
 
 
 class Relationship(BaseModel):
-    """A link between two components, by component_id (see RelationshipType)."""
+    """A link between two components, by component_id."""
 
     type: RelationshipType
     source: str
     target: str
 
 
+# Keeps only links between two different, real components, once each. A bad link is dropped rather
+# than failing the whole answer.
 def valid_relationships(relationships: list[Relationship], component_ids: set[str]) -> list[Relationship]:
-    """Only links between two different, real components, once each — a dangling or duplicate link
-    is dropped rather than failing the whole call."""
     kept: list[Relationship] = []
     seen: set[tuple[str, str, str]] = set()
     for rel in relationships:
@@ -125,10 +128,9 @@ def valid_relationships(relationships: list[Relationship], component_ids: set[st
 
 
 class TaskRepresentationOut(BaseModel):
-    """The whole task-aware model of one page — what the build_task_representation tool must return."""
+    """The whole task representation of one page."""
 
     page_purpose: str
-    page_type: str = ""
     tasks: list[TaskItem] = []
     components: list[ComponentItem] = []
     relationships: list[Relationship] = []
@@ -140,53 +142,38 @@ class TaskRepresentationOut(BaseModel):
         return self
 
 
-class PatchOut(BaseModel):
-    """What the add_components tool must return: the new components, plus any links from them."""
+# ****************************************************************************************************
+# Tool schema (mirrors the models above)
+# ****************************************************************************************************
 
-    components: list[ComponentItem] = []
-    relationships: list[Relationship] = []
-
-
-# --- Tool schema (mirrors the models above) -------------------------------------------------
-
-_TASK_SCHEMA = {
+TASK_SCHEMA = {
     "type": "object",
     "properties": {
-        "task_id": {"type": "string", "description": "Short stable id, e.g. \"t1\"."},
-        "label": {"type": "string", "description": "Concise user-facing goal."},
-        "description": {"type": "string"},
-        "task_type": {"type": "string", "description": "Short kebab-case label for the kind of task."},
-        "parent_task_id": {"type": ["string", "null"], "description": "Containing task id, or null."},
-        "component_ids": {"type": "array", "items": {"type": "string"},
-                          "description": "Ids of components that directly support this task."},
-        "importance": {"type": "string", "enum": list(Importance.__args__)},
+        "task_id": {"type": "string", "description": "Short stable id."},
+        "label": {"type": "string", "description": "The goal, in a few words."},
+        "description": {"type": "string", "description": "What the goal involves, from the page; \"\" only when the page says nothing more."},
+        "task_type": {"type": "string", "description": "Short kebab-case kind of task."},
+        "parent_task_id": {"type": ["string", "null"], "description": "The containing task's id, or null."},
+        "component_ids": {"type": "array", "items": {"type": "string"}, "description": "Components that serve this task directly."},
     },
-    "required": ["task_id", "label", "task_type", "parent_task_id", "component_ids", "importance"],
+    "required": ["task_id", "label", "description", "task_type", "parent_task_id", "component_ids"],
 }
 
-_COMPONENT_SCHEMA = {
+COMPONENT_SCHEMA = {
     "type": "object",
     "properties": {
-        "component_id": {"type": "string", "description": "Short stable id, e.g. \"c1\"."},
-        "component_type": {"type": "string", "enum": list(ComponentType.__args__),
-                           "description": "What kind of thing it is; see COMPONENT TYPES."},
-        "semantic_role": {"type": "string", "description": "What it is on this page, 1-3 kebab-case words, e.g. \"phone-number\"."},
-        "label": {"type": "string", "description": "Visible name/heading, when present."},
-        "description": {"type": "string"},
-        "dom_selector": {"type": "string",
-                         "description": "Selector of the smallest element that represents the whole unit — copied VERBATIM from an input element's `selector`. Never invented."},
-        "member_selectors": {"type": "array", "items": {"type": "string"},
-                             "description": "Selectors of the key nodes in this component, each copied verbatim from the input."},
+        "component_id": {"type": "string", "description": "Short stable id."},
+        "component_type": {"type": "string", "enum": list(ComponentType.__args__), "description": "What kind of thing it is; see COMPONENT TYPES."},
+        "label": {"type": "string", "description": "What it does or asks for, in a few words, from its visible name."},
+        "description": {"type": "string", "description": "What else the user needs to know about it, from the page, without repeating the label; \"\" only when the page gives nothing more."},
+        "dom_selector": {"type": "string", "description": "Selector of the smallest element covering the whole component, copied verbatim from an element."},
+        "member_selectors": {"type": "array", "items": {"type": "string"}, "description": "Selectors of its key elements, each copied verbatim."},
         "associated_task_ids": {"type": "array", "items": {"type": "string"}},
-        "required_for_task": {"type": "string", "enum": list(RequiredForTask.__args__),
-                              "description": "\"true\"/\"false\" only with visible evidence (an explicit required marker); otherwise \"unknown\"."},
-        "importance": {"type": "string", "enum": list(Importance.__args__)},
     },
-    "required": ["component_id", "component_type", "semantic_role", "dom_selector", "member_selectors",
-                 "associated_task_ids", "required_for_task", "importance"],
+    "required": ["component_id", "component_type", "label", "description", "dom_selector", "member_selectors", "associated_task_ids"],
 }
 
-_RELATIONSHIP_SCHEMA = {
+RELATIONSHIP_SCHEMA = {
     "type": "object",
     "properties": {
         "type": {"type": "string", "enum": list(RelationshipType.__args__)},
@@ -198,49 +185,16 @@ _RELATIONSHIP_SCHEMA = {
 
 TASK_REPRESENTATION_TOOL = {
     "name": "build_task_representation",
-    "description": "Transform a node-level page snapshot into a task-aware semantic model grounded in its real elements.",
+    "description": "Model one page as a hierarchy of the user's tasks and the components that carry them out, grounded in its real elements.",
     "input_schema": {
         "type": "object",
         "properties": {
-            "page_purpose": {"type": "string", "description": "The page's primary purpose in ONE short plain-language clause, <= 10 words (e.g. \"Apply for the Senior Engineer role\"). Not a full paragraph."},
-            "page_type": {"type": "string",
-                          "description": "Concise category, e.g. form, checkout, dashboard, search-results, article, settings, authentication, application, upload, multi-step-workflow."},
-            "tasks": {"type": "array", "items": _TASK_SCHEMA,
-                      "description": "Every meaningful user task on the page. Flat list; hierarchy via parent_task_id. No cap — a single form field is NOT a task."},
-            "components": {"type": "array", "items": _COMPONENT_SCHEMA,
-                           "description": "Every semantic component. Flat list, NO cap. Each individual form question is its own component."},
-            "relationships": {"type": "array", "items": _RELATIONSHIP_SCHEMA,
-                              "description": "Links between components with visible evidence on the page; empty if none."},
-            "modeling_notes": {"type": "string", "description": "Important ambiguity or unusual grouping decisions, or empty."},
+            "page_purpose": {"type": "string", "description": "The page's main purpose, one clause."},
+            "tasks": {"type": "array", "items": TASK_SCHEMA, "description": "Every task. Flat list; hierarchy via parent_task_id."},
+            "components": {"type": "array", "items": COMPONENT_SCHEMA, "description": "Every component. Each form question is its own."},
+            "relationships": {"type": "array", "items": RELATIONSHIP_SCHEMA, "description": "Links with visible evidence; [] if none."},
+            "modeling_notes": {"type": "string", "description": "Real ambiguity worth noting; \"\" if none."},
         },
-        "required": ["page_purpose", "page_type", "tasks", "components", "relationships", "modeling_notes"],
-    },
-}
-
-
-# --- Incremental patch (fast path — add/remove a few elements without re-modelling the page) -----
-
-class TaskPatchRequest(BaseModel):
-    """Body of POST /task-representations/{id}/patch: field elements that entered / left / came into
-    view since the last analyze. A cheap incremental update instead of re-modelling the whole page."""
-
-    added: list[PageElement] = []
-    removed: list[str] = []                  # selectors of components/fields that left the DOM
-    revealed: list[list[PageElement]] = []   # per question: was in the DOM hidden, now visible
-    containers: list[ContextContainer] = []  # the containers the added/revealed elements sit in
-
-
-PATCH_COMPONENTS_TOOL = {
-    "name": "add_components",
-    "description": "Return only the NEW components to append to an existing task representation for a few just-appeared elements.",
-    "input_schema": {
-        "type": "object",
-        "properties": {
-            "components": {"type": "array", "items": _COMPONENT_SCHEMA,
-                           "description": "New components only — one per distinct new question. Empty if the new elements aren't task-relevant."},
-            "relationships": {"type": "array", "items": _RELATIONSHIP_SCHEMA,
-                              "description": "Links from the new components to each other or to EXISTING components (by component_id); empty if none."},
-        },
-        "required": ["components", "relationships"],
+        "required": ["page_purpose", "tasks", "components", "relationships", "modeling_notes"],
     },
 }
