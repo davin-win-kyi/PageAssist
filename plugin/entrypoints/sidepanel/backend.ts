@@ -41,7 +41,7 @@ export const analyzePage = (id: string, page: PageElementsResponse | undefined) 
     body: JSON.stringify({ ...page, page_text: page?.pageText ?? '' }),
   }, ANALYZE_TIMEOUT_MS)
 
-export type PatchResponse = TaskNode & { changed?: boolean; added_items?: WidgetItem[] }
+export type PatchResponse = TaskNode & { changed?: boolean; added_items?: WidgetItem[]; unrelated?: number }
 export const patchPage = (id: string, added: PageElement[], removed: string[], revealed: PageElement[][], containers: PageContainer[]) =>
   request<PatchResponse>(`/task-representations/${site(id)}/patch`, {
     method: 'POST',
@@ -92,6 +92,10 @@ const quietly = (call: Promise<unknown>): Promise<void> =>
 // "final" is the interface as it was last seen, replaced each time
 export const recordScreenshot = (recordId: string, reason: 'applied' | 'updated' | 'saved' | 'final', image: string) =>
   quietly(request('/records/screenshots', { method: 'POST', headers: JSON_HEADERS, body: JSON.stringify({ record_id: recordId, reason, image }) }))
+
+// Pictures of every step of a widget that shows one step at a time, replacing any from before
+export const recordSteps = (recordId: string, images: string[]) =>
+  quietly(request('/records/steps', { method: 'POST', headers: JSON_HEADERS, body: JSON.stringify({ record_id: recordId, images }) }))
 
 export const recordError = (where: string, message: string, source: 'panel' | 'widget' = 'panel') =>
   quietly(request('/records/errors', { method: 'POST', headers: JSON_HEADERS, body: JSON.stringify({ source, where, message }) }))

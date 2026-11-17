@@ -107,3 +107,20 @@ export async function captureInterface(): Promise<string | null> {
   if (!rect) return null
   return cropScreenshot(await extensionChrome.tabs.captureVisibleTab(tab.windowId, { format: 'png' }), rect)
 }
+
+/*
+Pictures of every step of a widget that shows one step at a time, drawn inside its sandbox so the
+user sees nothing change. Null when the widget has no steps.
+*/
+export async function captureInterfaceSteps(): Promise<string[] | null> {
+  const tab = await new Promise<{ id?: number } | undefined>(resolve =>
+    extensionChrome?.tabs?.query({ active: true, currentWindow: true }, tabs => resolve(tabs[0])))
+  if (tab?.id === undefined) return null
+  const pictures = await new Promise<{ images?: unknown } | null>(resolve =>
+    extensionChrome.tabs?.sendMessage(tab.id!, { type: 'CAPTURE_INTERFACE_STEPS' }, (response?: unknown) => {
+      void extensionChrome.runtime?.lastError
+      resolve((response as { images?: unknown } | null | undefined) ?? null)
+    }))
+  if (!Array.isArray(pictures?.images)) return null
+  return pictures.images.filter((image): image is string => typeof image === 'string' && image.startsWith('data:image/png'))
+}

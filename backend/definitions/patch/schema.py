@@ -36,7 +36,7 @@ PATCH_COMPONENTS_TOOL = {
     "input_schema": {
         "type": "object",
         "properties": {
-            "components": {"type": "array", "items": COMPONENT_SCHEMA, "description": "New components only; [] if nothing is task-relevant."},
+            "components": {"type": "array", "items": COMPONENT_SCHEMA, "description": "New components only, each filed under the tasks it serves; [] if no new element is a component."},
             "relationships": {"type": "array", "items": RELATIONSHIP_SCHEMA, "description": "Links from new components to each other or to existing ones (by component_id); [] if none."},
         },
         "required": ["components", "relationships"],

@@ -53,7 +53,9 @@ the two examples below).
 
 Say support is already applied to a page, and something on the page changes — here, answering "Are
 you Hispanic/Latino?" reveals a follow-up race/ethnicity question. The interface adapts to that change
-on its own. You don't have to redo anything, and the page doesn't need a full re-analysis.
+on its own. You don't have to redo anything, and the page doesn't need a full re-analysis. Only a
+change that's part of the task the interface is for gets picked up: a question that serves none of its
+tasks, such as a newsletter signup loading in, leaves the interface as it is.
 
 ### Transferring a task interface to a new page
 
@@ -88,7 +90,7 @@ grounded in a different real page, none pulled from a predefined library.
 | `plugin/` | The Chrome extension you actually install — WXT + React. Reads the page, chats with the backend, and hosts the generated widget on the page in a sandboxed iframe. | [plugin/PageAssist_plugin.md](plugin/PageAssist_plugin.md) |
 | `backend/` | FastAPI + Claude service. Turns a page's real elements plus your chat-shaped preferences into the concrete widget the plugin shows. `api/` = `endpoints/<domain>/` (routes) + `state/` (in-process data) + `utils/` (shared infra); `definitions/<domain>/` = `prompts.py` + `schema.py` (what the model is told, no behavior). | [backend/PageAssist_backend.md](backend/PageAssist_backend.md) |
 | `tests/` | All tests for both halves, run as plain scripts (no pytest/vitest) against the real production code. | [tests/PageAssist_Tests.md](tests/PageAssist_Tests.md) |
-| `user_study/` | The study records: a folder per chat session with the conversation, the task and interface representations, each interface's code and screenshots, any errors, and the iteration counts. Made when the first session is recorded, and never committed. | [Study records](backend/PageAssist_backend.md#study-records) |
+| `user_study/` | The study records: a folder per chat session, with a folder per chat turn holding what was said, the interface representation it made, and each interface built from it with its code and screenshots (a picture of every step, for a step-by-step one), plus the task representations, any errors, and the iteration counts. Made when the first session is recorded, and never committed. | [Study records](backend/PageAssist_backend.md#study-records) |
 
 Each of those has its own README with the full file-by-file breakdown. This one stays at the system
 level: what the three representations are, and how a request flows end to end.
@@ -149,8 +151,9 @@ just falls back to a deterministic non-AI response, so the app still runs.
 
 ## Study records
 
-For user studies, the backend keeps a folder per chat session in `user_study/` at the top of the repo: the
-conversation, every task and interface representation, each interface's code and screenshots, any
-errors, and how many iterations it took to agree on an interface. `PAGEASSIST_RECORDS=off` turns it
+For user studies, the backend keeps a folder per chat session in `user_study/` at the top of the repo,
+with a folder per chat turn: what was said, the interface representation it made, and each interface
+built from it with its code and screenshots (a picture of every step, for a step-by-step one), plus
+every task representation, any errors, and how many iterations it took to agree on an interface. `PAGEASSIST_RECORDS=off` turns it
 off. See [Study records](backend/PageAssist_backend.md#study-records) for what each file holds and
 what is left out to protect participants' data.

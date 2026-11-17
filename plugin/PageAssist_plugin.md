@@ -108,13 +108,17 @@ decides that themselves (see the conversation walkthrough under How it works abo
   a widget is showing **patches** the task representation with just the added/removed fields
   (`POST /task-representations/{id}/patch` — fast) then splices the added/removed questions into the
   widget already on the page (`UPDATE_WIDGET_ITEMS`, from the patch's `added_items`) — seconds, not a
-  ~70s regeneration. It regenerates only when the patch fails (a full `analyze` first) or the widget
-  doesn't track page elements at all (a tutorial's manual steps), since only the model can decide
-  where a form question fits in a widget like that. Removals are always spliced out, even when the patch reports no component change, so a question that left the page leaves the widget too. A change that arrives while another is being applied is queued and applied right after, never dropped. Value edits are ignored (the checklist updates live client-side). The
+  ~70s regeneration. The backend judges the change against the tasks the widget serves: a new
+  question that serves none of them is left out (`unrelated`), and when that's all the change added,
+  nothing is spliced or rebuilt and the records say "not part of the chosen task". It regenerates only
+  when the patch fails (a full `analyze` first) or a question of the widget's tasks appears in a
+  widget that doesn't track page elements at all (a tutorial's manual steps), since only the model can
+  decide where a form question fits in a widget like that. Removals are always spliced out, even when the patch reports no component change, so a question that left the page leaves the widget too. A change that arrives while another is being applied is queued and applied right after, never dropped. Value edits are ignored (the checklist updates live client-side). The
   widget only ever appears on explicit user action.
 - Keeps the study records (see the backend's Study records): tells the backend why each widget is
   built, takes a screenshot of just the widget when it appears, after a page change is spliced into
-  it, and when it's saved (`captureInterface`: the tab's visible area from
+  it, and when it's saved, with a picture of every step of a widget that shows one step at a time
+  when it appears and after a splice (`captureInterfaceSteps`) (`captureInterface`: the tab's visible area from
   `chrome.tabs.captureVisibleTab`, cut down to the frame the content script reports), keeps a final
   screenshot of each widget up to date (retaken a few seconds after its checkmarks change, and just
   before it's replaced or the user starts over), files each save with the widget showing, and sends
@@ -172,8 +176,9 @@ It maintains three pieces of live state about the page it's running on, and does
    shown again. Labels are never
    fields (a file-upload widget swapping its "Attach / Dropbox / …" caption labels for a "&lt;filename&gt; ×"
    chip must not read as fields leaving). Even when a change does look structural, the panel's
-   `/patch` call can still come back `changed: false` and skip regenerating the widget — see the
-   backend README. (Completion state has its own instant, un-debounced `input`/`change`/`click`
+   `/patch` call can still come back `changed: false` and skip regenerating the widget: when it turns
+   out cosmetic, or adds only questions outside the tasks the widget serves — see the backend README.
+   The content script itself never judges a change by the task; it only reports what changed. (Completion state has its own instant, un-debounced `input`/`change`/`click`
    listeners — see step 4.) This is what the panel's `staleTaskRepRef` / `processStructuralChange`
    react to.
 3. **Host the widget** — creates the sandboxed iframe (`sandbox.html`, via `lib/interface-frame.ts`,
@@ -238,6 +243,14 @@ code is trusted to respect):
   usable `event.origin` string (it reports as `"null"`), so both sides check `event.source` — the
   exact `Window` object that sent the message — to confirm it's really talking to its counterpart and
   not some unrelated frame.
+
+**Pictures of every step, for the study records.** A widget that shows one part at a time (a step,
+card, page or slide) sets `window.pageassist.steps` to `count()`, `current()` and `show(index)` (a
+rule in the widget prompt). On `capture-steps`, the sandbox shows each step, renders it and copies it,
+all in one synchronous pass, then shows the user's step again: the browser never paints in between,
+so the user sees nothing change, and no frame resize is sent for a step they aren't on. The copies
+are drawn into PNGs afterwards, through an SVG image of each, which keeps everything inside the
+sandbox (no network, and the canvas stays readable).
 - **One deliberate `eval`.** The generated code is executed via `new Function(data.code)()` — the only
   eval in the whole system, and safe specifically *because* everything above already holds: opaque
   origin, no network, message-only communication.
@@ -270,10 +283,10 @@ grounded items from the page; any other key the model put on an item (e.g. `sect
 
 | Channel | Direction | Messages |
 |---|---|---|
-| `chrome.tabs.sendMessage` | panel → content script | `GET_PAGE_ELEMENTS` (→ `{url, title, elements}`), `APPLY_WEBPAGE_INTERFACE {tree}` (`null` tree removes), `UPDATE_WIDGET_ITEMS {add, remove}` (→ `{ok, added, removed}`; `ok: false` means regenerate instead), `GET_INTERFACE_RECT` (→ the widget frame's box and the visible area's size, for a screenshot of it) |
+| `chrome.tabs.sendMessage` | panel → content script | `GET_PAGE_ELEMENTS` (→ `{url, title, elements}`), `APPLY_WEBPAGE_INTERFACE {tree}` (`null` tree removes), `UPDATE_WIDGET_ITEMS {add, remove}` (→ `{ok, added, removed}`; `ok: false` means regenerate instead), `GET_INTERFACE_RECT` (→ the widget frame's box and the visible area's size, for a screenshot of it), `CAPTURE_INTERFACE_STEPS` (→ `{images, current}`, a picture of every step, or `null` for a widget without steps) |
 | `chrome.runtime.sendMessage` | content script → panel | `PAGE_CHANGED {event}`, `WIDGET_STATE_CHANGED`, `WIDGET_ERROR {message}` (the widget's code threw), `WEBPAGE_INTERFACE_APPLIED {ok}` |
-| `iframe.contentWindow.postMessage` | content script ↔ sandbox | host → `{type:'init', code, state}`, `{type:'state', state}` |
-| `window.parent.postMessage` | sandbox → content script | `sandbox-ready`, `resize {height}`, `error {message}`, and the `window.pageassist` calls below (`dragStart {screenX, screenY}` / `dragEnd` for a drag) |
+| `iframe.contentWindow.postMessage` | content script ↔ sandbox | host → `{type:'init', code, state}`, `{type:'state', state}`, `{type:'capture-steps', id}` |
+| `window.parent.postMessage` | sandbox → content script | `sandbox-ready`, `resize {height}`, `error {message}`, `steps {id, images, current}`, and the `window.pageassist` calls below (`dragStart {screenX, screenY}` / `dragEnd` for a drag) |
 
 ### `window.pageassist` — the only host capabilities the widget gets
 

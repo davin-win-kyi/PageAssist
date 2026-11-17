@@ -11,6 +11,14 @@ WEBPAGE_INTERFACE_TOOL = {
     "input_schema": {
         "type": "object",
         "properties": {
+            "task_ids": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": (
+                    "The task_id of each task the widget serves, picked in PROCESS step 2. A question that "
+                    "appears on the page later joins the widget only when it's part of one of these."
+                ),
+            },
             "style": {
                 "type": "object",
                 "description": "CSS for the widget's OUTER frame, its position and size only. {} unless the user asked.",
@@ -46,6 +54,6 @@ WEBPAGE_INTERFACE_TOOL = {
                 "description": "Initial data for render(state). Any other keys you add pass through on every later state push.",
             },
         },
-        "required": ["style", "code", "state"],
+        "required": ["task_ids", "style", "code", "state"],
     },
 }

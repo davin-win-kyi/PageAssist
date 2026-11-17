@@ -8,6 +8,10 @@ The following file runs PageAssist end to end on the three live pages used for t
 - a saved interface is transferred to the other pages, and on Kargo, answering the Hispanic/Latino
   question must add the race question to the interface that's showing
 - on Creatify, the Yes/No questions and the resume upload must tick off their items
+- a step-by-step interface gets a picture of every step, and a change asked for once it shows is a
+  new turn that builds a new interface, each in its own folder in the records
+- each widget comes back with the tasks it serves, and a newsletter signup appearing on the page,
+  which serves none of them, must leave the interface showing as it is
 
 Note: once a page has loaded, nothing it would send is let out, since Ashby saves each answer and
 uploads a chosen file straight away. Nothing typed or chosen in a test leaves the machine.
@@ -107,6 +111,16 @@ const INTERFACES = {
       form: "This application is long and I lose track of its parts. I'd like an overview of its sections, showing how much of each one is done.",
       tutorial: "This tutorial is long and I lose track of its parts. I'd like an overview of its sections, showing the steps in each one.",
     },
+  },
+  'step-by-step': {
+    title: 'Step-by-step guide',
+    pick: 'the step-by-step guide',
+    ask: {
+      form: "I get lost in long applications. I'd like a step-by-step guide that shows me one question at a time, with buttons to go to the next and previous one.",
+      tutorial: "I get lost in long tutorials. I'd like a step-by-step guide that shows me one step at a time, with buttons to go to the next and previous step.",
+    },
+    // a change asked for once it shows, which makes a new interface in a new turn
+    refine: 'Please make the text a bit bigger.',
   },
   'walkthrough': {
     title: 'Detailed walkthrough',
@@ -358,7 +372,27 @@ async function shapeInterface(port, spec, kind, { startOver = true } = {}) {
     message = turn === 1 && !offers ? "Yes, that's right." : `Let's go with ${spec.pick}.`;
   }
   const agreed = !!result?.agreed && treeHasContent(result?.interface_representation);
-  return { agreed, tree: result?.interface_representation ?? null, turns };
+  return { agreed, tree: result?.interface_representation ?? null, turns, history };
+}
+
+/*
+Asks for a change once the interface shows, as a user would. The panel builds the interface again
+when the agreed interface representation changes, so the turn makes a new interface.
+*/
+async function refineInterface(site, port, siteId, key, shaped, widget) {
+  const spec = INTERFACES[key];
+  const started = Date.now();
+  const reply = await api(port, 'POST', '/chat', { message: spec.refine, history: shaped.history });
+  const result = { user: spec.refine, reply: reply.reply, ms: Date.now() - started, changed: JSON.stringify(reply.interface_representation) !== JSON.stringify(shaped.tree) };
+  if (!result.changed) return result;
+  await fileScreenshot(site, port, widget.record_id, 'final');
+  const refined = await api(port, 'POST', `/webpage-interfaces/${encodeURIComponent(siteId)}/generate?reason=chat`);
+  result.recordId = refined.record_id;
+  result.apply = await applyWidget(site, refined);
+  result.shots = { widget: await shoot(site, `${key}-refined-widget`, { widgetOnly: true }) };
+  await fileScreenshot(site, port, refined.record_id, 'applied');
+  result.steps = await fileSteps(site, port, refined.record_id, `${key}-refined`);
+  return result;
 }
 
 // The widget's sandbox frame on the page
@@ -418,8 +452,9 @@ async function describeItems(site, items) {
 }
 
 /*
-Follows a page change the way the panel does: patch the task representation, then splice the
-added and removed questions into the widget, or generate the widget again when that can't be done
+Follows a page change the way the panel does: patch the task representation, which judges it
+against the tasks the widget serves, then splice the added and removed questions into the widget,
+or generate the widget again when that can't be done
 */
 async function followPageChange(site, port, siteId, event, recordId) {
   const started = Date.now();
@@ -430,6 +465,7 @@ async function followPageChange(site, port, siteId, event, recordId) {
   const patchMs = Date.now() - started;
   const noRealChange = patch?.changed === false;
   const addedItems = noRealChange ? [] : (patch?.added_items ?? []);
+  const unrelated = patch?.unrelated ?? 0;
   const spliced = addedItems.length || body.removed.length ? await site.send({ type: 'UPDATE_WIDGET_ITEMS', add: addedItems, remove: body.removed }) : undefined;
   let outcome = 'no change';
   if (spliced?.ok && spliced.added + spliced.removed > 0) outcome = 'spliced';
@@ -439,18 +475,18 @@ async function followPageChange(site, port, siteId, event, recordId) {
     await applyWidget(site, widget);
     await fileScreenshot(site, port, widget.record_id, 'applied');
     outcome = 'regenerated';
-  }
+  } else if (noRealChange && unrelated > 0) outcome = 'not part of the chosen task';
   // what the panel files in the records about the change
-  const counts = { fields_added: body.added.length + body.revealed.flat().length, fields_removed: body.removed.length };
+  const counts = { fields_added: body.added.length + body.revealed.flat().length, fields_removed: body.removed.length, components_unrelated: unrelated };
   if (outcome === 'spliced') {
     await fileScreenshot(site, port, recordId, 'updated');
     await recordEvent(port, 'page change', { outcome: 'spliced', ...counts, items_added: spliced.added, items_removed: spliced.removed });
   } else if (error) {
     await recordError(port, 'page change', error);
   } else {
-    await recordEvent(port, 'page change', { outcome: outcome === 'regenerated' ? 'rebuilt the interface' : 'no change to the interface', ...counts });
+    await recordEvent(port, 'page change', { outcome: { regenerated: 'rebuilt the interface', 'no change': 'no change to the interface' }[outcome] ?? outcome, ...counts });
   }
-  return { patchMs, totalMs: Date.now() - started, changed: patch?.changed, addedItems: addedItems.length, removed: body.removed.length, spliced, outcome };
+  return { patchMs, totalMs: Date.now() - started, changed: patch?.changed, addedItems: addedItems.length, unrelated, removed: body.removed.length, spliced, outcome };
 }
 
 // The page-change events posted since the last call, with any structural one followed like the panel
@@ -515,6 +551,26 @@ async function fileScreenshot(site, port, recordId, reason) {
   for (const as of reason === 'final' ? ['final'] : [reason, 'final']) {
     await api(port, 'POST', '/records/screenshots', { record_id: recordId, reason: as, image }).catch(() => {});
   }
+}
+
+/*
+Takes a picture of every step of a widget that shows one step at a time, the way the panel does, and
+files them with its interface. Also says whether the widget was on the same step afterwards.
+*/
+async function fileSteps(site, port, recordId, name) {
+  const before = await widgetText(site);
+  const pictures = await site.send({ type: 'CAPTURE_INTERFACE_STEPS' }).catch(() => null);
+  const after = await widgetText(site);
+  const images = (pictures?.images ?? []).filter((image) => typeof image === 'string' && image.startsWith('data:image/png'));
+  const filed = recordId && images.length > 0
+    ? await api(port, 'POST', '/records/steps', { record_id: recordId, images }).then(() => true, () => false)
+    : false;
+  const files = images.map((image, i) => {
+    const file = `shots/${site.key}-${name}-step-${i + 1}.png`;
+    fs.writeFileSync(path.join(OUT, file), Buffer.from(image.split(',')[1], 'base64'));
+    return file;
+  });
+  return { registered: Array.isArray(pictures?.images), count: images.length, distinct: new Set(images).size, filed, sameAfter: before === after, files };
 }
 
 // The rest of what the side panel files in the records
@@ -606,6 +662,11 @@ async function testInterface(site, port, siteId, key, startOver) {
     const widget = await api(port, 'POST', `/webpage-interfaces/${encodeURIComponent(siteId)}/generate?reason=chat`);
     result.generate = { ms: Date.now() - started, degraded: widget.degraded === true, codeChars: (widget.code || '').length };
     check(`${site.key} ${key}: the widget is generated`, !widget.degraded, widget.state?.error);
+    // the tasks it serves, which page changes are judged against
+    const tasks = site.results.analysis?.tasks ?? [];
+    result.tasks = (widget.task_ids ?? []).map((id) => tasks.find((task) => task.task_id === id)?.label ?? id);
+    check(`${site.key} ${key}: the widget comes back with the tasks it serves, all of them the page's`,
+      Array.isArray(widget.task_ids) && widget.task_ids.length > 0 && widget.task_ids.every((id) => tasks.some((task) => task.task_id === id)), JSON.stringify(widget.task_ids));
     result.items = await describeItems(site, widget.state?.items ?? []);
     check(`${site.key} ${key}: every grounded item is on the page`, result.items.missingSelectors === 0, `${result.items.missingSelectors} missing`);
     check(`${site.key} ${key}: no item is grounded on an action`, result.items.onActions === 0, `${result.items.onActions} on actions`);
@@ -621,6 +682,16 @@ async function testInterface(site, port, siteId, key, startOver) {
     // saved from the chat's offer, as a user would, with a screenshot of what was saved
     result.saved = await api(port, 'POST', '/interface-representations', { name: `${spec.title} on ${site.key}`, record_id: widget.record_id });
     await fileScreenshot(site, port, widget.record_id, 'saved');
+    result.recordId = widget.record_id;
+
+    // a picture of every step, for a widget that shows one step at a time
+    result.steps = await fileSteps(site, port, widget.record_id, key);
+    if (key === 'step-by-step') {
+      check(`${site.key} ${key}: the interface tells the host its steps`, result.steps.registered && result.steps.count >= 2, JSON.stringify(result.steps));
+      check(`${site.key} ${key}: a picture of every step is filed with the interface`, result.steps.filed);
+      check(`${site.key} ${key}: each step's picture is different`, result.steps.count >= 2 && result.steps.distinct === result.steps.count, `${result.steps.distinct} different of ${result.steps.count}`);
+      check(`${site.key} ${key}: the user's step is still showing after the pictures`, result.steps.sameAfter);
+    }
 
     if (site.kind === 'form') {
       const before = await widgetText(site);
@@ -647,11 +718,80 @@ async function testInterface(site, port, siteId, key, startOver) {
       result.shots.after = await shoot(site, `${key}-after`, { widgetOnly: true });
     }
     result.pageChanges = await drainPageChanges(site, port, siteId, widget.record_id);
+    if (site.results.interfaces.length === 0) result.unrelatedChange = await testUnrelatedChange(site, port, siteId, widget, key);
     result.widget = widget;
+
+    if (spec.refine) {
+      result.refined = await refineInterface(site, port, siteId, key, shaped, widget);
+      check(`${site.key} ${key}: asking for a change once it shows builds a new interface`, !!result.refined.recordId, JSON.stringify({ reply: result.refined.reply, changed: result.refined.changed }));
+      if (result.refined.recordId && key === 'step-by-step') {
+        check(`${site.key} ${key}: the new interface gets a picture of every step too`, result.refined.steps.filed && result.refined.steps.count >= 2, JSON.stringify(result.refined.steps));
+      }
+    }
   } catch (error) {
     result.error = error.message;
     check(`${site.key} ${key}: runs without errors`, false, error.message);
   }
+  return result;
+}
+
+/*
+A question that serves none of the interface's tasks appears on the page, the way a newsletter
+signup can load in late. The page change is noticed and judged against the tasks the interface
+serves, and the interface stays as it is: nothing spliced in, nothing rebuilt. Taking the question
+away again leaves it as it is too.
+*/
+async function testUnrelatedChange(site, port, siteId, widget, key) {
+  log(`\n== ${site.key}: a question outside the ${key}'s task appears ==`);
+  const result = { followed: 0 };
+  const labels = async () => JSON.stringify(((await lastState(site))?.items ?? widget.state?.items ?? []).map((item) => item.label));
+  const before = await labels();
+  // waits for the page change that adds (or removes) the question, then follows every one since
+  const follow = async (adding) => {
+    let event = null;
+    for (let i = 0; i < 60 && !event; i += 1) {
+      await wait(250);
+      event = await site.page.evaluate((adding) => window.__paEvents.find((e) => e.structural
+        && (adding ? [...(e.addedFields ?? []), ...(e.revealedFields ?? []).flat()].map((f) => f.selector) : (e.removedFields ?? []))
+          .some((selector) => selector.includes('pa-test-newsletter'))) ?? null, adding);
+    }
+    const drained = await drainPageChanges(site, port, siteId, widget.record_id);
+    result.followed += drained.structural.length;
+    return { noticed: !!event, changes: drained.structural.map((f) => ({ outcome: f.outcome, unrelated: f.unrelated, added: f.event.added, removed: f.event.removed })) };
+  };
+  const leftAsIs = (changes) => changes.length > 0 && changes.every((c) => c.outcome === 'no change' || c.outcome === 'not part of the chosen task');
+
+  await site.page.evaluate(() => window.__paEvents.splice(0));
+  await site.page.evaluate(() => {
+    const form = document.createElement('form');
+    form.id = 'pa-test-newsletter';
+    const heading = document.createElement('h4');
+    heading.textContent = 'Subscribe to our newsletter';
+    const label = document.createElement('label');
+    label.htmlFor = 'pa-test-newsletter-email';
+    label.textContent = 'Your email';
+    const input = document.createElement('input');
+    input.id = 'pa-test-newsletter-email';
+    input.type = 'email';
+    input.name = 'newsletter_email';
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.textContent = 'Subscribe';
+    form.append(heading, label, input, button);
+    document.body.append(form);
+  });
+  result.appeared = await follow(true);
+  const after = await labels();
+  check(`${site.key}: a newsletter signup appearing is noticed as a page change`, result.appeared.noticed, JSON.stringify(result.appeared.changes));
+  check(`${site.key}: a newsletter signup appearing leaves the ${key} as it is`, leftAsIs(result.appeared.changes) && after === before,
+    JSON.stringify({ changes: result.appeared.changes, sameItems: after === before }));
+  check(`${site.key}: the newsletter signup is judged not part of the ${key}'s task`,
+    result.appeared.changes.some((c) => c.outcome === 'not part of the chosen task' && c.unrelated > 0), JSON.stringify(result.appeared.changes));
+
+  await site.page.evaluate(() => document.getElementById('pa-test-newsletter')?.remove());
+  result.removed = await follow(false);
+  check(`${site.key}: the newsletter signup going away leaves the ${key} as it is`,
+    result.removed.noticed && leftAsIs(result.removed.changes) && (await labels()) === before, JSON.stringify(result.removed.changes));
   return result;
 }
 
@@ -836,41 +976,61 @@ The study records each backend kept
 
 /*
 Every chat turn, task representation, interface representation version and built interface of a
-page's run must be in its backend's records, each interface with its code and screenshots
+page's run must be in its backend's records: each chat turn in its own folder, and each interface in
+its own folder in the turn that made it, with its code and screenshots
 */
 function checkRecords(site) {
   const root = path.join(dataDirs[site.key], 'user_study');
-  const sessions = fs.existsSync(root) ? fs.readdirSync(root).map((name) => path.join(root, name)) : [];
   const read = (file) => (fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : '');
-  const turns = sessions.reduce((n, dir) => n + read(path.join(dir, 'conversation.jsonl')).split('\n').filter(Boolean).length, 0);
-  const versions = sessions.reduce((n, dir) => n + (fs.existsSync(path.join(dir, 'interface_representations')) ? fs.readdirSync(path.join(dir, 'interface_representations')).length : 0), 0);
-  const tasks = sessions.reduce((n, dir) => n + (fs.existsSync(path.join(dir, 'task_representations')) ? fs.readdirSync(path.join(dir, 'task_representations')).length : 0), 0);
-  const interfaces = sessions.flatMap((dir) => (fs.existsSync(path.join(dir, 'interfaces')) ? fs.readdirSync(path.join(dir, 'interfaces')).map((name) => path.join(dir, 'interfaces', name)) : []));
-  const chatTurns = site.results.interfaces.reduce((n, i) => n + (i.chat?.turns ?? 0), 0);
-  const built = site.results.interfaces.filter((i) => i.generate).length;
+  const list = (dir) => (fs.existsSync(dir) ? fs.readdirSync(dir) : []);
+  const sessions = list(root).map((name) => path.join(root, name));
+  const turnDirs = sessions.flatMap((dir) => list(dir).filter((name) => /^turn-\d+$/.test(name)).map((name) => path.join(dir, name)));
+  const meta = (dir) => JSON.parse(read(path.join(dir, 'meta.json')) || '{}');
+  const turns = turnDirs.filter((dir) => fs.existsSync(path.join(dir, 'turn.json'))).length;
+  const versions = turnDirs.reduce((n, dir) => n + list(dir).filter((name) => /^interface_representation(-\d+)?\.json$/.test(name)).length, 0);
+  const tasks = turnDirs.reduce((n, dir) => n + list(path.join(dir, 'task_representations')).length, 0);
+  const interfaces = turnDirs.flatMap((dir) => list(dir).filter((name) => name.startsWith('interface-')).map((name) => path.join(dir, name)));
+  const chatTurns = site.results.interfaces.reduce((n, i) => n + (i.chat?.turns ?? 0) + (i.refined ? 1 : 0), 0);
+  const built = site.results.interfaces.reduce((n, i) => n + (i.generate ? 1 : 0) + (i.refined?.recordId ? 1 : 0), 0);
   const summaries = sessions.map((dir) => JSON.parse(read(path.join(dir, 'summary.json')) || '{}'));
   site.results.records = { folder: root, sessions: sessions.length, turns, versions, tasks, interfaces: interfaces.length };
-  check(`${site.key}: every chat turn is in the records`, turns === chatTurns, `${turns} recorded, ${chatTurns} taken`);
+
+  check(`${site.key}: every chat turn has its own folder in the records`, turns === chatTurns, `${turns} recorded, ${chatTurns} taken`);
+  check(`${site.key}: every interface has its own folder, in the turn that made it`,
+    interfaces.length >= built && interfaces.every((dir) => path.basename(path.dirname(dir)) === `turn-${String(meta(dir).turn).padStart(2, '0')}`),
+    `${interfaces.length} recorded, ${built} built: ${interfaces.map((dir) => path.relative(root, dir)).join(', ')}`);
   const builtFrom = ['code.js', 'interface_representation.json', 'task_representation.json'];
   check(`${site.key}: every interface is in the records with its code, what it was built from, and a screenshot`,
-    interfaces.length >= built && interfaces.every((dir) => builtFrom.every((name) => fs.existsSync(path.join(dir, name))))
-      && interfaces.filter((dir) => fs.readdirSync(dir).some((name) => name.startsWith('screenshot-'))).length >= built,
-    `${interfaces.length} recorded, ${built} built`);
+    interfaces.every((dir) => builtFrom.every((name) => fs.existsSync(path.join(dir, name))))
+      && interfaces.filter((dir) => list(dir).some((name) => name.startsWith('screenshot-'))).length >= built);
   check(`${site.key}: every interface has its final screenshot, and every saved one a screenshot of what was saved`,
-    interfaces.every((dir) => fs.readdirSync(dir).some((name) => name.startsWith('screenshot-final.')))
-      && interfaces.filter((dir) => (JSON.parse(read(path.join(dir, 'meta.json'))).saved ?? []).length > 0)
-        .every((dir) => fs.readdirSync(dir).some((name) => name.startsWith('screenshot-saved'))),
-    interfaces.map((dir) => `${path.basename(dir)}: ${fs.readdirSync(dir).filter((name) => name.startsWith('screenshot')).join(' ')}`).join('; '));
+    interfaces.every((dir) => list(dir).some((name) => name.startsWith('screenshot-final.')))
+      && interfaces.filter((dir) => (meta(dir).saved ?? []).length > 0).every((dir) => list(dir).some((name) => name.startsWith('screenshot-saved'))),
+    interfaces.map((dir) => `${path.basename(dir)}: ${list(dir).filter((name) => name.startsWith('screenshot')).join(' ')}`).join('; '));
   const savedNames = site.results.interfaces.filter((i) => i.saved).map((i) => i.saved.name);
-  const filedSaves = interfaces.flatMap((dir) => (JSON.parse(read(path.join(dir, 'meta.json'))).saved ?? []).map((save) => save.name));
+  const filedSaves = interfaces.flatMap((dir) => (meta(dir).saved ?? []).map((save) => save.name));
   check(`${site.key}: every interface saved is filed with the interface that was showing`,
     savedNames.every((name) => filedSaves.includes(name)), `${savedNames.join(', ')} saved; ${filedSaves.join(', ')} filed`);
+  const stepped = site.results.interfaces.flatMap((i) => [[i.recordId, i.steps], [i.refined?.recordId, i.refined?.steps]]).filter(([id, steps]) => id && steps?.filed);
+  check(`${site.key}: every interface that shows one step at a time has a picture of every step`,
+    stepped.every(([id, steps]) => {
+      const dir = interfaces.find((d) => path.basename(d) === `interface-${id}`);
+      return !!dir && meta(dir).steps === steps.count && list(dir).filter((name) => name.startsWith('screenshot-step-')).length === steps.count;
+    }), stepped.map(([id, steps]) => `${id}: ${steps.count} steps`).join('; '));
+  for (const i of site.results.interfaces.filter((each) => each.refined?.recordId)) {
+    const first = interfaces.find((dir) => path.basename(dir) === `interface-${i.recordId}`);
+    const refined = interfaces.find((dir) => path.basename(dir) === `interface-${i.refined.recordId}`);
+    check(`${site.key} ${i.key}: the change is its own turn, and its interface is in that turn's folder, apart from the first`,
+      !!first && !!refined && path.dirname(first) !== path.dirname(refined) && fs.existsSync(path.join(path.dirname(refined), 'turn.json')),
+      `${first && path.relative(root, first)} then ${refined && path.relative(root, refined)}`);
+  }
   check(`${site.key}: each interface records the iterations that led to it`,
-    interfaces.every((dir) => typeof JSON.parse(read(path.join(dir, 'meta.json'))).iterations?.chat_turns === 'number'));
+    interfaces.every((dir) => typeof meta(dir).iterations?.chat_turns === 'number'));
   check(`${site.key}: the task representations and interface representation versions are in the records`, tasks >= 1 && versions >= built, `${tasks} task, ${versions} interface`);
   check(`${site.key}: each session's summary counts the turns it took to agree`, summaries.some((s) => typeof s.turns_to_agreement === 'number'));
-  const followed = site.results.interfaces.reduce((n, i) => n + (i.pageChanges?.structural?.length ?? 0), 0) + (site.results.activeChange?.follow ? 1 : 0);
-  const pageChanges = sessions.reduce((n, dir) => n + ['events.jsonl', 'errors.jsonl']
+  const followed = site.results.interfaces.reduce((n, i) => n + (i.pageChanges?.structural?.length ?? 0) + (i.unrelatedChange?.followed ?? 0), 0)
+    + (site.results.activeChange?.follow ? 1 : 0);
+  const pageChanges = turnDirs.reduce((n, dir) => n + ['events.jsonl', 'errors.jsonl']
     .reduce((m, name) => m + read(path.join(dir, name)).split('\n').filter((line) => line.includes('"page change"')).length, 0), 0);
   check(`${site.key}: every page change the interface followed is in the records`, pageChanges === followed, `${pageChanges} recorded, ${followed} followed`);
 }

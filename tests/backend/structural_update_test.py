@@ -231,6 +231,30 @@ check("analyze accepts elements with container/description/completion_status + a
 r = c.post(f"/task-representations/{SITE}/patch", json={"added": [dict(race, container="#eeo")], "containers": [eeo]})
 check("patch accepts the containers its added elements sit in", r.status_code == 200, r.text[:300])
 
+print("\n== 7. a question outside the widget's tasks leaves the widget as it is ==")
+# A page change is judged against the tasks the widget showing serves, which it names when it's built.
+# A newsletter signup appearing on the application serves none of them: it's kept in the task
+# representation, with nothing to splice in and nothing to rebuild. A follow-up question still joins.
+analyze(BEFORE)
+w = generate()
+known = {t["task_id"] for t in c.get(f"/task-representations/{SITE}").json().get("tasks", [])}
+check("the widget names the tasks it serves, all of them the page's",
+      bool(w.get("task_ids")) and set(w["task_ids"]) <= known, f"{w.get('task_ids')} of {sorted(known)}")
+newsletter = {"selector": "#newsletter", "tag": "form", "role": "", "label": "Subscribe to our newsletter", "parent": ""}
+r = c.post(f"/task-representations/{SITE}/patch", json={
+    "added": [{"id": "newsletter_email", "selector": "#newsletter_email", "tag": "input", "text": "", "role": "textbox",
+               "accessibleName": "Your email", "visible": True, "container": "#newsletter"}],
+    "containers": [newsletter]})
+body = r.json()
+check("a newsletter signup appearing on the application: nothing to splice, nothing to rebuild",
+      r.status_code == 200 and body.get("changed") is False and body.get("added_items") == [],
+      str({k: body.get(k) for k in ("changed", "added_items", "unrelated")}))
+r = c.post(f"/task-representations/{SITE}/patch", json={"added": [race]})
+body = r.json()
+check("a follow-up question revealed by an answer still joins the widget",
+      body.get("changed") is True and any("#race" in ([it.get("selector")] + (it.get("selectors") or [])) for it in body.get("added_items", [])),
+      str({k: body.get(k) for k in ("changed", "added_items", "unrelated")}))
+
 print("\n== RESULT ==")
 if FAIL:
     print(f"  {len(FAIL)} FAILED: {FAIL}")

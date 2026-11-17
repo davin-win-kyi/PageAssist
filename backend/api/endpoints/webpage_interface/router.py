@@ -11,6 +11,7 @@ from api.state.task import task_store
 from api.state.interface_representation import get_active_tree
 from api.state.webpage_interface import get_webpage_interface, set_webpage_interface
 from api.endpoints.webpage_interface.helpers import build_webpage_interface
+from api.endpoints.patch.helpers import served_task_ids
 from api.utils import records
 
 router = APIRouter()
@@ -25,7 +26,8 @@ def get_webpage_interface_route(site_id: str) -> dict[str, Any]:
 
 
 # `reason` says why it was built (the chat, a saved interface, or a page change). The widget comes
-# back with the `record_id` its screenshots are filed under in the records.
+# back with the `task_ids` of the tasks it serves, which later page changes are judged against, and
+# the `record_id` its screenshots are filed under in the records.
 @router.post("/webpage-interfaces/{site_id}/generate")
 async def generate_webpage_interface(site_id: str, reason: str = Query("unspecified", pattern="^[a-z-]{1,30}$")) -> dict[str, Any]:
     if task_store.get("site_id") != site_id or task_store.get("task_representation") is None:
@@ -34,6 +36,8 @@ async def generate_webpage_interface(site_id: str, reason: str = Query("unspecif
     tree, task_representation = get_active_tree(), task_store["task_representation"]
     started = time.perf_counter()
     widget = await build_webpage_interface(tree, task_representation, task_store.get("page_text", ""))
+    items = (widget.get("state") or {}).get("items") or []
+    widget = {**widget, "task_ids": served_task_ids(task_representation, widget.get("task_ids"), items if isinstance(items, list) else [])}
     record_id = records.interface(site_id, widget, tree, task_representation, reason, time.perf_counter() - started)
     widget = {**widget, "record_id": record_id}
     set_webpage_interface(widget)

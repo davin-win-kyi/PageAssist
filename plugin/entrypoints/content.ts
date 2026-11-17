@@ -207,10 +207,12 @@ export default defineContentScript({
     window.addEventListener('message', (event) => {
       const frame = frames.current();
       if (!frame || event.source !== frame.contentWindow) return;
-      const data = event.data as { source?: string; type?: string; message?: string } | null;
+      const data = event.data as { source?: string; type?: string; message?: string; id?: string; images?: unknown; current?: unknown } | null;
       if (!data || data.source !== 'pageassist-sandbox') return;
       if (frames.handleMessage(frame, data)) return;
-      if (data.type === 'sandbox-ready') {
+      if (data.type === 'steps') {
+        stepRequests.get(String(data.id))?.(Array.isArray(data.images) ? { images: data.images, current: Number(data.current) || 0 } : null);
+      } else if (data.type === 'sandbox-ready') {
         interfaceReady = true;
         const resolvers = interfaceReadyResolvers;
         interfaceReadyResolvers = [];
@@ -223,6 +225,28 @@ export default defineContentScript({
         try { sendToPanel({ type: 'WIDGET_ERROR', message: String(data.message ?? '') }); } catch { /* invalidated context */ }
       }
     });
+
+    /*
+    Pictures of every step of a widget that shows one at a time, drawn by the sandbox, for the study
+    records. Null when the widget has no steps, or doesn't answer in time.
+    */
+    type StepPictures = { images: unknown[]; current: number } | null;
+    const stepRequests = new Map<string, (pictures: StepPictures) => void>();
+    function captureSteps(): Promise<StepPictures> {
+      const target = frames.current()?.contentWindow;
+      if (!target || !interfaceReady) return Promise.resolve(null);
+      const id = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+      return new Promise((resolve) => {
+        const timer = window.setTimeout(() => finish(null), 15000);
+        function finish(pictures: StepPictures) {
+          window.clearTimeout(timer);
+          stepRequests.delete(id);
+          resolve(pictures);
+        }
+        stepRequests.set(id, finish);
+        target.postMessage({ type: 'capture-steps', id }, '*');
+      });
+    }
 
     /*
     Applies one widget at a time, in the order they arrive
@@ -412,6 +436,7 @@ export default defineContentScript({
     - apply the webpage interface
     - splice an update into the interface
     - where the interface is, for a screenshot of it
+    - pictures of every step of the interface
     - get the page elements on the current page
     */
     try {
@@ -425,10 +450,15 @@ export default defineContentScript({
           // where the widget is, so the panel can screenshot just the widget for the records
           const box = frames.current()?.getBoundingClientRect();
           sendResponse(box ? { left: box.left, top: box.top, width: box.width, height: box.height, viewportWidth: window.innerWidth, viewportHeight: window.innerHeight } : null);
+        } else if (message?.type === 'CAPTURE_INTERFACE_STEPS') {
+          void captureSteps().then(sendResponse);
+          // answered once the sandbox has drawn the steps
+          return true;
         } else if (message?.type === 'GET_PAGE_ELEMENTS') {
           const { elements, containers } = scanPage();
           sendResponse({ url: location.href, title: document.title, elements, containers, pageText: getPageText(), frames: countFrames() });
         }
+        return undefined;
       });
     } catch {
       teardownOnInvalidatedContext();

@@ -1,4 +1,4 @@
 """
 The records definitions: the request schemas in schema.py
 """
-from definitions.records.schema import ScreenshotRecord, ErrorRecord, EventRecord
+from definitions.records.schema import ScreenshotRecord, StepsRecord, ErrorRecord, EventRecord

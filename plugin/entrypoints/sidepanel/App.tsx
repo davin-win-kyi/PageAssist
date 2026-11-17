@@ -29,7 +29,7 @@ import {
 import type { ApplyPhase, ChatEntry, PageChange, SavedInterface, Site, TaskNode, Widget } from './types'
 import * as backend from './backend'
 import { errorText } from './backend'
-import { pushWebpageInterface as pushToPage, applyWidgetAndWait, updateWidgetItemsOnPage, listenToPage, captureInterface } from './page-messages'
+import { pushWebpageInterface as pushToPage, applyWidgetAndWait, updateWidgetItemsOnPage, listenToPage, captureInterface, captureInterfaceSteps } from './page-messages'
 import { siteIdFor, countInputish, looksSparse, treeHasContent, mergeChanges, defaultSaveName as buildSaveName } from './helpers'
 import ChatTab from './ChatTab'
 import SavedTab from './SavedTab'
@@ -142,7 +142,8 @@ function App() {
 
   /*
   Screenshots of just the widget for the study records. Each one is also the widget's final
-  screenshot, the way it was last seen, until it changes again.
+  screenshot, the way it was last seen, until it changes again. When the widget appears or a page
+  change updates it, a widget that shows one step at a time also gets a picture of every step.
   */
   const saveScreenshot = (recordId: string | null | undefined, reason: 'applied' | 'updated' | 'saved') => {
     if (!recordId) return
@@ -154,6 +155,10 @@ function App() {
           if (recordIdRef.current === recordId) void backend.recordScreenshot(recordId, 'final', image)
         })
         .catch(error => console.warn('PageAssist: could not take a screenshot of the widget', error))
+      if (reason === 'saved') return
+      void captureInterfaceSteps()
+        .then(images => { if (images?.length && recordIdRef.current === recordId) void backend.recordSteps(recordId, images) })
+        .catch(error => console.warn('PageAssist: could not take pictures of the widget\'s steps', error))
     }, 900)
   }
 
@@ -287,17 +292,18 @@ function App() {
 
   /*
   Patches a page change into the task representation rather than analyzing the whole page again.
-  Returns null when there's nothing to patch.
+  The backend judges it against the tasks the widget serves: `unrelated` counts the new questions
+  that serve none of them, which stay out of the widget. Returns null when there's nothing to patch.
   */
-  type PatchResult = { task: TaskNode; changed: boolean; addedItems: WidgetItem[] } | { error: string }
+  type PatchResult = { task: TaskNode; changed: boolean; addedItems: WidgetItem[]; unrelated: number } | { error: string }
   const patchTaskRepresentation = async (change: PageChange): Promise<PatchResult | null> => {
     const id = siteIdRef.current
     if (!id || (change.added.length === 0 && change.removed.length === 0 && change.revealed.length === 0)) return null
     try {
-      const { changed, added_items, ...task } = await backend.patchPage(id, change.added, change.removed, change.revealed, change.containers)
+      const { changed, added_items, unrelated, ...task } = await backend.patchPage(id, change.added, change.removed, change.revealed, change.containers)
       setTaskRepresentation(task)
       lastAnalyzeAtRef.current = Date.now()
-      return { task, changed: changed !== false, addedItems: Array.isArray(added_items) ? added_items : [] }
+      return { task, changed: changed !== false, addedItems: Array.isArray(added_items) ? added_items : [], unrelated: typeof unrelated === 'number' ? unrelated : 0 }
     } catch (error) {
       console.error('Unable to patch task representation', error)
       backend.recordError('patch', errorText(error))
@@ -422,11 +428,13 @@ function App() {
         let failure = ''
         let noRealChange = false
         let addedItems: WidgetItem[] = []
+        let unrelated = 0
         const patched = await patchTaskRepresentation(change)
         if (patched && 'task' in patched) {
           task = patched.task
           noRealChange = !patched.changed
           addedItems = patched.addedItems
+          unrelated = patched.unrelated
         } else {
           const site = await analyzeCurrentSite(true)
           task = site.hasPage ? site.task : undefined
@@ -441,20 +449,22 @@ function App() {
           ? await updateWidgetItemsOnPage(noRealChange ? [] : addedItems, change.removed)
           : undefined
 
-        const added = change.added.length + change.revealed.flat().length
+        const counts = { fields_added: change.added.length + change.revealed.flat().length, fields_removed: change.removed.length, components_unrelated: unrelated }
         if (spliced?.ok && spliced.added + spliced.removed > 0) {
           finishApply(true, UPDATED_TEXT)
           saveScreenshot(recordIdRef.current, 'updated')
-          backend.recordEvent('page change', { outcome: 'spliced', fields_added: added, fields_removed: change.removed.length, items_added: spliced.added, items_removed: spliced.removed })
+          backend.recordEvent('page change', { outcome: 'spliced', ...counts, items_added: spliced.added, items_removed: spliced.removed })
         } else if (failure && hasWidget) {
           finishApply(false, `⚠ Couldn’t update the support for the page change (${failure}).`)
           backend.recordError('page change', failure)
         } else if (noRealChange || spliced?.ok) {
           if (hasWidget) setApplyPhase('idle')
-          backend.recordEvent('page change', { outcome: 'no change to the interface', fields_added: added, fields_removed: change.removed.length })
+          // only new questions outside the widget's tasks, which it leaves out
+          const outcome = noRealChange && unrelated > 0 ? 'not part of the chosen task' : 'no change to the interface'
+          backend.recordEvent('page change', { outcome, ...counts })
         } else if (task && siteIdRef.current && widgetSiteIdRef.current === siteId) {
           finishWidget(await generateWebpageInterface(siteIdRef.current, 'page-change'), UPDATED_TEXT)
-          backend.recordEvent('page change', { outcome: 'rebuilt the interface', fields_added: added, fields_removed: change.removed.length })
+          backend.recordEvent('page change', { outcome: 'rebuilt the interface', ...counts })
         } else if (hasWidget) {
           setApplyPhase('idle')
         }

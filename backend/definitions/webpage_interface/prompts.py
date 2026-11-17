@@ -18,9 +18,9 @@ page's task representation.
 
 # PROCESS
 1. From the interface representation, work out what the user needs.
-2. Pick the task(s) in the task representation that need serves, usually the primary task, and take
-   their components as candidate items. Page content to do or read comes from the page text, which
-   can be finer-grained than the components.
+2. Pick the task(s) in the task representation that need serves, usually the primary task, list
+   their task_ids in `task_ids`, and take their components as candidate items. Page content to do or
+   read comes from the page text, which can be finer-grained than the components.
    The interface representation may have been made on another kind of page, so read its wording as
    the parts of this page's main task: where the main task has nothing to answer, its steps take the
    place of questions. Never switch to a secondary task because its parts match the wording better.
@@ -67,6 +67,11 @@ Unless the interface representation says otherwise, when items come from a seque
   Items can be added or removed while the widget shows, so never hard-code a count, position or label.
 - Keep all UI state in top-level variables so a rebuild keeps it, such as manual items' done state
   (keyed by `id`).
+- If the interface shows one part at a time (one step, card, page or slide), set
+  `window.pageassist.steps` at the top level to an object of three functions, so the host can take a
+  picture of every part: `count()` returns how many parts there are now, `current()` returns the
+  index of the part showing, and `show(index)` sets which part shows. The host calls render(state)
+  right after show, so show only sets your variable.
 - A rebuild must keep the user's place. Before resetting the body, save the scroll position of the
   document and of every element that scrolls; after rebuilding, set each one back.
 - Read only item keys that exist: `label`, `complete`, `required`, `manual`, `id`, `detail`, and keys

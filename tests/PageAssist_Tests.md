@@ -17,6 +17,7 @@ markup, prints one `[ok]`/`[FAIL]` line per assertion, and exits non-zero on the
 PYTHONPATH=backend backend/.venv/bin/python tests/backend/full_flow_test.py
 PYTHONPATH=backend backend/.venv/bin/python tests/backend/structural_update_test.py
 PYTHONPATH=backend backend/.venv/bin/python tests/backend/records_test.py      # no model needed
+PYTHONPATH=backend backend/.venv/bin/python tests/backend/task_relevance_test.py   # no model needed
 ```
 
 - **full_flow_test.py** — every endpoint once: health, analyze, GET task rep, interface reset,
@@ -26,21 +27,36 @@ PYTHONPATH=backend backend/.venv/bin/python tests/backend/records_test.py      #
   deterministic correction of a `selectors: [...]` bundle — including the label-id false-positive
   regression, and the model-can't-be-trusted-to-pick-the-right-control case).
 - **records_test.py** — the study records, without a model: a new chat starts a session folder,
-  and so does recording before the first one; every chat turn, task representation and interface
-  representation version is kept, with the turn the user agreed on and the refinements after it;
-  each interface keeps its code, items, iterations, and the two representations it was built from;
-  screenshots are filed with their interface, numbered rather than overwritten, and refused for a
-  record id outside the session or anything that isn't an image; errors and events are kept; page
-  addresses keep no query string and no page text is kept; the final screenshot is replaced as the
-  interface changes; a save or an update of a saved interface is filed with the interface that was
+  and so does recording before the first one; what comes before the first chat turn is in turn-00,
+  and each chat turn gets its own folder with what was said and replied and the interface
+  representation it made (there is no combined conversation file); each interface gets its own folder
+  in the turn that made it, with its code, items, iterations, and the two representations it was
+  built from, and a refinement's interface gets a new folder in its own turn; screenshots are filed
+  with their interface, numbered rather than overwritten, and refused for a record id outside the
+  session or anything that isn't an image; the final screenshot is replaced as the interface changes;
+  a picture of every step is filed in order and replaced when taken again; task representations,
+  errors and events are kept with the turn they happened in; page addresses keep no query string and
+  no page text is kept; a save or an update of a saved interface is filed with the interface that was
   showing; a session folder removed while running is started again, and a record that can't be
   written is skipped instead of failing the chat.
 - **structural_update_test.py** — a revealed field (answering "Are you Hispanic/Latino?" on the
   Greenhouse/Snorkel page reveals `#race`) must flow into the widget's `state.items`, via both the
   full re-analyze path and the fast `/task-representations/{id}/patch` path (splice + regenerate,
   `added_items` for splicing into a live widget, plus removal and the un-analyzed-site 404); a `revealed` question is added only when nothing of it
-  is mapped yet (an already-mapped one, or a radio group with any option mapped, adds nothing); and
-  `containers` flow through analyze and patch.
+  is mapped yet (an already-mapped one, or a radio group with any option mapped, adds nothing);
+  `containers` flow through analyze and patch; and the widget names the tasks it serves, so a
+  newsletter signup appearing on the application leaves it as it is (`changed: false`, nothing to
+  splice), while the race follow-up still joins it.
+- **task_relevance_test.py** — how a page change is judged against the tasks the widget showing
+  serves, without a model (the model calls answer with fixed components): the tasks a widget serves
+  (the ones it names that the page has, plus those its tracked questions are filed under; every task
+  when it names none); a new component filed under the tasks the model gave, an id the page doesn't
+  have dropped, a follow-up question filed with the question it follows, and one that serves no task
+  kept but filed under none; a task covering its sub-tasks, at every level; the patch route splicing
+  in only what's part of the widget's tasks (a widget for one section takes only that section's new
+  questions), reporting `changed: false` when nothing else came, counting the rest in `unrelated`,
+  and recording the tasks it judged against; generate returning and recording the tasks a widget
+  serves; and a new analysis dropping the widget held.
 
 These need a model configured in `backend/.env` (they hit the real model and take a few minutes);
 PageAssist has no model-free fallbacks. Each run uses a throwaway data dir, so `backend/data/` and
@@ -152,14 +168,24 @@ node tests/e2e/live_sites.mjs --sites kargo --interfaces checklist   # a quicker
     the right state. On the tutorial every item must be ticked by hand, and ticking one must work.
   - On Kargo it answers Hispanic/Latino "No" and checks the race question is spliced into the widget
     that's showing.
+  - Each widget must come back with the tasks it serves. On each page, a newsletter signup is added to
+    the page while the first interface shows: it must be noticed as a page change, judged not part
+    of the interface's task, and leave the interface as it is (nothing spliced in, nothing rebuilt),
+    and so must taking it away again.
   - It saves interfaces and moves them between pages, in both directions.
   - On Creatify, answering the Yes/No questions with their buttons and uploading a resume must tick
     off their items, and the resume must stay ticked off once the page empties its file input.
+  - A step-by-step guide (`--interfaces step-by-step`) must tell the host its steps and get a
+    different picture of every step, filed with its interface, while the user's step stays showing.
+    Then a change is asked for in one more turn ("make the text a bit bigger"): the new interface it
+    builds must get its own folder, in that turn's folder, apart from the first.
   - Once a page has loaded, every request it would send is dropped (Ashby saves each answer and
     uploads a chosen file straight away), so nothing typed or chosen leaves the machine.
   - It never submits a form. It needs network access, a model in `backend/.env`, and Chrome: set
     `CHROME_PATH`, or it uses Playwright's Chromium.
-  - It also checks each page's study records, filed as the side panel files them: every chat turn,
-    every interface with its code, the representations it was built from, its screenshots (including
-    the final one, and one of what was saved) and the iterations that led to it, every save filed with
-    its interface, the task and interface representations, and every page change it followed.
+  - It also checks each page's study records, filed as the side panel files them: every chat turn in
+    its own folder; every interface in its own folder in the turn that made it, with its code, the
+    representations it was built from, its screenshots (including the final one, one of what was
+    saved, and one of every step of a step-by-step interface) and the iterations that led to it;
+    every save filed with its interface; the task and interface representations; and every page
+    change it followed.

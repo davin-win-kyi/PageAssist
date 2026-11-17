@@ -13,8 +13,10 @@ ONLY the new components for them, plus any relationships from them. Never restat
 components or tasks.
 
 # INPUT
+- PAGE PURPOSE: what the page is for.
+- TASKS: the page's tasks, each with its task_id, label, description and parent_task_id.
 - EXISTING components: a summary of what's already modelled: each one's component_id,
-  component_type, label and dom_selector.
+  component_type, label, dom_selector and associated_task_ids.
 - NEW elements: what just appeared, with the same fields as a full scan.
 - CONTAINERS: the groups the new elements sit in.
 {ELEMENT_FIELDS}
@@ -24,6 +26,10 @@ components or tasks.
   answer depends_on that question.
 - If the new elements are decorative or part of an existing control's dynamic UI, return no
   components.
+- File each new component under the TASKS it serves, by task_id in associated_task_ids. A question
+  revealed by another answer serves that question's tasks. A component serves a task only when doing
+  that task needs it; being on the same page is not enough. Use [] when it serves none of them, and
+  never invent a task_id.
 
 {COMPONENT_RULES}
 {REQUIREMENTS}"""

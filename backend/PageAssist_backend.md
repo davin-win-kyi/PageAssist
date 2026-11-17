@@ -51,8 +51,11 @@ elements, even though the underlying preferences never changed.
 
 Support is applied to a page; an active change occurs on it (here, answering "Are you
 Hispanic/Latino?" reveals a follow-up race/ethnicity question); the interface adapts to account for
-the change — without the user redoing anything, and without a full re-analysis of the page. See
-`/task-representations/{id}/patch` under Model calls below for the mechanism behind that adaptation.
+the change — without the user redoing anything, and without a full re-analysis of the page. A change
+is judged against the tasks the interface serves: a question that serves none of them (a newsletter
+signup loading in on an application) is kept in the task representation but leaves the interface as
+it is. See `/task-representations/{id}/patch` under Model calls below for the mechanism behind that
+adaptation.
 
 ## Folders, at a glance
 
@@ -89,7 +92,7 @@ backend/
 | `task/router.py` | `POST /task-representations/{id}/analyze` and the `GET` |
 | `task/helpers.py` | the analyze model call |
 | `patch/router.py` | `POST /task-representations/{id}/patch` |
-| `patch/helpers.py` | removing and appending components, the revealed-question rule, the fast patch model call |
+| `patch/helpers.py` | removing and appending components (filed under the tasks they serve), the revealed-question rule, the tasks a widget serves and which new components are part of them, the fast patch model call |
 | `chat/router.py` | `POST /chat` |
 | `chat/helpers.py` | the chat model call, `tree_has_content`, `prune_empty_parts` (drops parts with nothing in them before the tree is stored) |
 | `chat/repair.py` | the tree-repair call, run when a chat turn says it changed the tree but returned none |
@@ -97,7 +100,7 @@ backend/
 | `webpage_interface/router.py` | generate/GET a widget |
 | `webpage_interface/helpers.py` | the widget model call, `enforce_bundled_selectors`, `components_to_items`, the failure widget |
 | `webpage_interface/failed_widget.js` | the red warning widget shown in place of the widget when generation fails |
-| `records/router.py` | `POST /records/screenshots`, `/records/errors`, `/records/events`: what the side panel sends to the study records |
+| `records/router.py` | `POST /records/screenshots`, `/records/steps`, `/records/errors`, `/records/events`: what the side panel sends to the study records |
 
 **`api/state/`** — plain module-level dicts + the getters/setters around them:
 
@@ -113,7 +116,7 @@ backend/
 |---|---|
 | `json_store.py` | shared JSON load/dump + points at `backend/data/` |
 | `llm.py` | provider switch (Anthropic or Gemini), `create_message()` (→ `anthropic_create_message` / `gemini_create_message`), `call_structured_tool()`, `THINKING_LEVELS`, `ModelError` |
-| `records.py` | the study records: a folder per chat session in `user_study/` at the top of the repo (see Study records below) |
+| `records.py` | the study records: a folder per chat session in `user_study/` at the top of the repo, with a folder per chat turn (see Study records below) |
 
 **`definitions/`** — one `prompts.py` + `schema.py` per domain, pure data:
 
@@ -131,7 +134,7 @@ backend/
 | `interface_representation/schema.py` | `TREE_SCHEMA` (the tree's JSON schema, used by the chat and repair tools so every part has fields to fill) and `SaveInterfaceRepresentationRequest` |
 | `webpage_interface/prompts.py` | `WEBPAGE_INTERFACE_GUIDE` — how to turn the interface representation + page into a widget |
 | `webpage_interface/schema.py` | the `build_webpage_interface` tool's `input_schema` |
-| `records/schema.py` | the bodies of the records routes: a screenshot, an error, an event |
+| `records/schema.py` | the bodies of the records routes: a screenshot, the pictures of an interface's steps, an error, an event |
 
 **`data/`** — runtime JSON (git-ignored), the on-disk form of `api/state/`'s dicts:
 
@@ -154,8 +157,8 @@ that confusion.
 | Method + path | Purpose |
 |---|---|
 | `GET /health` | liveness |
-| `POST /task-representations/{site_id}/analyze` | Build this page's **task representation** from its real elements; replaces the single stored slot. Body may include `page_text` (the page's readable prose), stored for widget generation. This is the expensive, full-model call — used on first load of a page and whenever the page has changed enough that a partial patch wouldn't be trustworthy. |
-| `POST /task-representations/{site_id}/patch` | Fast path — splice just-added fields in / drop removed ones (the fast model) instead of re-modelling the whole page. Returns the full updated representation plus `changed: bool` (false when the flagged DOM change turned out cosmetic — nothing was actually added/removed, so the caller shouldn't bother regenerating the widget) and `added_items` (the new components as widget items, which the panel splices into the widget already on the page instead of regenerating it). |
+| `POST /task-representations/{site_id}/analyze` | Build this page's **task representation** from its real elements; replaces the single stored slot, and drops the widget held in memory, whose task ids belong to the old one. Body may include `page_text` (the page's readable prose), stored for widget generation. This is the expensive, full-model call — used on first load of a page and whenever the page has changed enough that a partial patch wouldn't be trustworthy. |
+| `POST /task-representations/{site_id}/patch` | Fast path — splice just-added fields in / drop removed ones (the fast model) instead of re-modelling the whole page, judged against the tasks the widget held serves. Returns the full updated representation plus `changed: bool` (false when the flagged DOM change turned out cosmetic, or only added questions outside the widget's tasks — so the caller shouldn't bother regenerating the widget), `added_items` (the new components of the widget's tasks as widget items, which the panel splices into the widget already on the page instead of regenerating it) and `unrelated` (how many new components serve none of the widget's tasks: kept in the representation, left out of the widget). |
 | `GET /task-representations/{site_id}` | Read the stored task representation (404 if it's for another site). |
 | `GET /interface-representation` | The active **interface representation** (the working preference tree) + its `agreed` flag. |
 | `POST /interface-representation/reset` | Blank the active tree and clear `agreed` — this is what "new chat" / "end chat and start over" calls. |
@@ -165,11 +168,12 @@ that confusion.
 | `POST /interface-representations/{id}/update` | Write the current active tree back onto that saved entry (overwrite it with whatever chat has since refined). An optional `{record_id}` body files the update with the interface showing. |
 | `DELETE /interface-representations/{id}` | Remove a saved entry. The working tree is untouched — if it came from this entry, it's just unlinked (no more "update the one I came from" offer). |
 | `POST /chat` | One conversational turn. May reply with text only, or also replace the active interface representation and/or flip `agreed` to true (the model's "this concept is concrete enough to show" signal). |
-| `POST /webpage-interfaces/{site_id}/generate?reason=` | Combine the stored task representation + the active interface representation into a **webpage interface** (a concrete, model-generated widget); hold it in memory and return it. This is the call that actually produces the thing that shows up on the page. `reason` (`chat`, `saved` or `page-change`) says why it was built, and the widget comes back with the `record_id` it's filed under in the study records. |
+| `POST /webpage-interfaces/{site_id}/generate?reason=` | Combine the stored task representation + the active interface representation into a **webpage interface** (a concrete, model-generated widget); hold it in memory and return it. This is the call that actually produces the thing that shows up on the page. `reason` (`chat`, `saved` or `page-change`) says why it was built. The widget comes back with `task_ids`, the tasks it serves (the ones the model names, plus the ones its tracked questions are filed under; every task when it names none), which later page changes are judged against, and the `record_id` it's filed under in the study records. |
 | `POST /records/screenshots` | A screenshot of an interface, `{record_id, reason, image}` as a PNG or JPEG data URL, filed with it in the records. `reason` is `applied`, `updated`, `saved` or `final`; each gets its own numbered file, except `final`, which is replaced. Refused for an interface that isn't in the current session. |
+| `POST /records/steps` | A picture of every step of an interface that shows one step at a time, `{record_id, images}` in order, replacing any from before. |
 | `POST /records/errors` | An error the side panel showed, or one from the widget's code: `{source, where, message}`. |
 | `POST /records/events` | Something else worth keeping, such as how a page change was applied to the interface: `{kind, details}`. |
-| `GET /webpage-interfaces/{site_id}` | Read the in-memory widget (404 after a restart, or for another site — nothing is regenerated automatically). |
+| `GET /webpage-interfaces/{site_id}` | Read the in-memory widget (404 after a restart, after the page is analyzed again, or for another site — nothing is regenerated automatically). |
 
 `site_id` is an opaque key the client builds from `hostname + pathname + search` (with `/` → `~`) and
 `encodeURIComponent`s into the path. Store the raw value; match on it exactly.
@@ -180,33 +184,51 @@ For user studies, the backend keeps everything PageAssist makes in `user_study/`
 repo, outside `backend/` so it's easy to find. It's never committed, and `PAGEASSIST_RECORDS=off` turns
 it off. A throwaway `PAGEASSIST_DATA_DIR`, as the tests use, takes the records with it, so a test never
 adds to the study. Each chat session gets its own folder, named by when it started. A session starts
-when the side panel opens or the user starts over.
+when the side panel opens or the user starts over. Inside it, each chat turn gets its own folder, and
+each interface gets its own folder in the turn that made it, so nothing from one turn is mixed in with
+another.
 
 ```
 user_study/2026-10-20_14-03-11/
   summary.json                    counts and timings for the session, updated as it goes
-  conversation.jsonl              one line per chat turn: what the user said, the reply, the quick
-                                  replies, whether they had agreed, and the interface version it made
-  interface_representations/      every version of the interface representation: 001.json, 002.json ...
-                                  each with the chat turn or saved interface it came from
-  task_representations/           every analysis and page-change patch: 001-analyze-<page>.json ...
-  interfaces/001-<page>/          every interface built for a page
-    code.js                       the widget's code
-    widget.json                   its style and items
-    interface_representation.json the interface representation it was built from
-    task_representation.json      the task representation it was built from, so each interface is
-                                  complete even in a session that started over without a new analysis
-    meta.json                     why it was built, how long it took, its items, the iterations
-                                  that led to it, and the names it was saved as
-    screenshot-applied.png        the widget when it appeared, taken by the side panel
-    screenshot-updated.png        the widget after a page change was spliced into it
-    screenshot-saved.png          the widget when it was saved, or a saved one was updated
-    screenshot-final.png          the widget as it was last seen: retaken a few seconds after its
+  turn-00/                        before the first chat turn: opening the panel
+    task_representations/         the page's analysis: 001-analyze-<page>.json
+  turn-01/
+    turn.json                     what the user said, the reply, the quick replies, and whether they
+                                  agreed
+  turn-03/
+    turn.json
+    interface_representation.json the interface representation this turn made, when it changed it
+    interface-001-<page>/         an interface built from this turn (or after it, before the next turn,
+                                  such as one rebuilt after a page change), numbered across the session
+      code.js                     the widget's code
+      widget.json                 its style and items
+      interface_representation.json the interface representation it was built from
+      task_representation.json    the task representation it was built from
+      meta.json                   the turn it was built in, why, how long it took, the tasks it serves,
+                                  its items, the iterations that led to it, how many steps it has, and
+                                  the names it was saved as
+      screenshot-applied.png      the widget when it appeared, taken by the side panel
+      screenshot-step-01.png ...  every step of a widget that shows one step at a time (see below)
+      screenshot-updated.png      the widget after a page change was spliced into it
+      screenshot-saved.png        the widget when it was saved, or a saved one was updated
+      screenshot-final.png        the widget as it was last seen: retaken a few seconds after its
                                   checkmarks change, and just before it's replaced or the user starts over
-  errors.jsonl                    errors from the backend, the side panel and the widget's code
-  events.jsonl                    interfaces saved, updated or deleted (a save names the interface that
-                                  was showing), and how page changes were applied
+    task_representations/         page-change patches made during the turn, numbered across the session,
+                                  each with the tasks it was judged against and how many new components
+                                  served none of them
+    events.jsonl                  interfaces saved, updated or deleted (a save names the interface that
+                                  was showing), saved interfaces used again, and how page changes were
+                                  applied: spliced in, rebuilt, no change, or not part of the chosen
+                                  task
+    errors.jsonl                  errors from the backend, the side panel and the widget's code
 ```
+
+A widget that shows one part at a time (a step, card, page or slide) tells the host about its parts
+(`window.pageassist.steps`, a rule in the widget prompt). When it appears, and after a page change
+updates it, the sandbox draws a picture of every step: each step is shown and copied in the same
+moment and the user's step is shown again, so the user sees nothing change. The pictures replace the
+ones from before, since a page change can add or remove steps.
 
 `summary.json` counts the iterations: `chat_turns`, `turns_to_agreement` (the turn on which the user
 agreed to an interface; 0 when they used a saved one), `interface_representation_versions`,
@@ -346,9 +368,22 @@ This is the mechanism behind the adapting-to-changes example under How it works 
 `/task-representations/{id}/patch` uses `get_fast_client_and_model()` (`ANTHROPIC_MODEL_FAST`, else
 `ANTHROPIC_MODEL`; on Gemini, low thinking — about 2s, and it added a revealed question correctly every
 time at every level) with a tiny prompt that returns **only the new component(s)** for a few
-just-appeared elements (told to return an empty list when they aren't task-relevant); the route
-splices them in (and drops components for removed selectors), re-ids to avoid collisions, and links
-them to the first top-level task, the page's main one. `remove_components` reports how many EXISTING components it actually dropped — a UI-only DOM swap
+just-appeared elements (an empty list when they're decorative or part of a control's own UI); the
+route splices them in (and drops components for removed selectors) and re-ids to avoid collisions.
+The model sees the page's purpose and tasks, and files each new component under the tasks it serves
+(`[]` when it serves none; an id the page doesn't have is dropped). A follow-up question is also
+filed with the tasks of the question it `depends_on`, so one the model left unfiled still goes with
+the question that revealed it.
+
+The change is then judged against the tasks the widget held in memory serves (`task_ids`, set when it
+was generated: the tasks the model names, plus those its tracked questions are filed under; every task
+when it names none). A new component filed under one of them, or under a sub-task of one, joins the
+widget through `added_items`. One filed elsewhere, or nowhere, is kept in the representation but left
+out of the widget, and counted in `unrelated`. `changed` is false when that's all the change added,
+so the panel neither splices nor rebuilds, and records the change as "not part of the chosen task".
+On a page with no tasks, every new component counts. A new analysis drops the widget held, since a
+fresh analysis numbers its tasks anew; until a widget is built from it, a change is judged against
+every task. `remove_components` reports how many EXISTING components it actually dropped — a UI-only DOM swap
 inside an already-modelled question (a file-upload button row replaced by a "&lt;filename&gt; ×"
 chip) almost never matches a real component's selector, so `changed` comes back `false` and the panel
 skips regenerating the widget instead of claiming an update happened for nothing. `revealed` carries
@@ -395,7 +430,7 @@ question then takes seconds instead of a full widget regeneration (~70s at mediu
   real values, so nothing to copy). The patch
   is validated against the same component model (`PatchOut`) and may link a new component to an
   existing one — a revealed follow-up `depends_on` the question that revealed it. If the model returns
-  no components (the new elements aren't task-relevant), nothing is added.
+  no components (the new elements are decorative or part of a control's own UI), nothing is added.
 - **Grounding.** Every `dom_selector` / `member_selector` is copied verbatim from an input node;
   prefer `visible` nodes; never assert a value, completion, or "required" without a visible marker.
   Completion is read live by the content script — there are no model-asserted status fields.

@@ -2,6 +2,7 @@
 Helper methods for the patch route
 - removing and adding components in the stored task representation
 - deciding which revealed questions are new
+- deciding which new components are part of the tasks the widget serves
 - the model call for the new components
 """
 from typing import Any
@@ -47,19 +48,35 @@ def remove_components(rep: dict[str, Any], selectors: list[str]) -> int:
     return len(dropped_ids)
 
 
-# Adds the new components under the first top-level task, the page's main one.
+# The task ids each component is filed under, from the component's side and the task's.
+def filed_under(rep: dict[str, Any]) -> dict[str, set[str]]:
+    filed = {c.get("component_id"): {tid for tid in c.get("associated_task_ids", []) if isinstance(tid, str)}
+             for c in rep.get("components", [])}
+    for task in rep.get("tasks", []):
+        if isinstance(task.get("task_id"), str):
+            for cid in task.get("component_ids", []):
+                filed.setdefault(cid, set()).add(task["task_id"])
+    return filed
+
+
+# Adds the new components, each filed under the tasks the model gave it that the page has. A question
+# that applies only given another's answer is also filed with that question's tasks. One that serves
+# none of the tasks is kept, filed under none. Run after the new relationships are added.
 def append_components(rep: dict[str, Any], new_components: list[dict[str, Any]]) -> None:
     if not new_components:
         return
+    tasks = {t.get("task_id"): t for t in rep.get("tasks", [])}
     rep.setdefault("components", []).extend(new_components)
-    tasks = rep.get("tasks", [])
-    task = next((t for t in tasks if not t.get("parent_task_id")), tasks[0] if tasks else None)
-    if task is None:
-        return
+    filed = filed_under(rep)
     for comp in new_components:
-        if task["task_id"] not in comp.setdefault("associated_task_ids", []):
-            comp["associated_task_ids"].append(task["task_id"])
-    task.setdefault("component_ids", []).extend(c["component_id"] for c in new_components)
+        task_ids = list(comp.get("associated_task_ids", []))
+        for rel in rep.get("relationships", []):
+            if rel.get("type") == "depends_on" and rel.get("source") == comp["component_id"]:
+                task_ids += sorted(filed.get(rel.get("target"), set()))
+        comp["associated_task_ids"] = [tid for tid in dict.fromkeys(task_ids) if tid in tasks]
+        filed[comp["component_id"]] = set(comp["associated_task_ids"])
+        for tid in comp["associated_task_ids"]:
+            tasks[tid].setdefault("component_ids", []).append(comp["component_id"])
 
 
 # A question that was hidden at analyze time may already be modelled, so only groups with no mapped
@@ -67,6 +84,44 @@ def append_components(rep: dict[str, Any], new_components: list[dict[str, Any]])
 def unmapped_revealed(rep: dict[str, Any], revealed: list[list[PageElement]]) -> list[PageElement]:
     mapped = mapped_selectors(rep)
     return [e for group in revealed if not any(e.selector in mapped for e in group) for e in group]
+
+
+# ****************************************************************************************************
+# The widget's tasks
+# ****************************************************************************************************
+
+# The tasks a widget serves, of those the representation has: the ones it names, plus the ones its
+# tracked questions are filed under. A widget that names none serves every task on the page, so only
+# what serves no task is left out of it. Empty only on a page with no tasks.
+def served_task_ids(rep: dict[str, Any], named: Any, items: list[Any] | None = None) -> list[str]:
+    known = {t.get("task_id") for t in rep.get("tasks", []) if isinstance(t.get("task_id"), str)}
+    ids = [tid for tid in (named if isinstance(named, list) else []) if isinstance(tid, str)]
+    tracked = {s for item in items or [] if isinstance(item, dict)
+               for s in ([item.get("selector")] + (item.get("selectors") if isinstance(item.get("selectors"), list) else []))
+               if isinstance(s, str)}
+    if tracked:
+        filed = filed_under(rep)
+        for comp in rep.get("components", []):
+            if {comp.get("dom_selector"), *comp.get("member_selectors", [])} & tracked:
+                ids += sorted(filed.get(comp.get("component_id"), set()))
+    ids = [tid for tid in dict.fromkeys(ids) if tid in known]
+    top = [t["task_id"] for t in rep.get("tasks", []) if not t.get("parent_task_id") and t.get("task_id") in known]
+    return ids or top or sorted(known)
+
+
+# The new components that are part of the widget's tasks: filed under one of them or one of their
+# sub-tasks. On a page with no tasks, all of them are.
+def part_of_tasks(rep: dict[str, Any], new_components: list[dict[str, Any]], task_ids: list[str]) -> list[dict[str, Any]]:
+    if not task_ids:
+        return new_components
+    family = set(task_ids)
+    while True:
+        children = {t.get("task_id") for t in rep.get("tasks", []) if t.get("parent_task_id") in family} - family
+        if not children:
+            break
+        family |= children
+    filed = filed_under(rep)
+    return [c for c in new_components if filed.get(c["component_id"], set()) & family]
 
 
 # ****************************************************************************************************
@@ -79,9 +134,14 @@ async def model_patch_components(
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     client, model = get_fast_client_and_model()
     print(f"patch [{model}]: {len(added)} added element(s), {len(rep.get('components', []))} existing component(s)")
+    tasks = [{"task_id": t.get("task_id"), "label": t.get("label"), "description": t.get("description"),
+              "parent_task_id": t.get("parent_task_id")} for t in rep.get("tasks", [])]
     existing = [{"component_id": c.get("component_id"), "component_type": c.get("component_type"),
-                 "label": c.get("label"), "dom_selector": c.get("dom_selector")} for c in rep.get("components", [])]
+                 "label": c.get("label"), "dom_selector": c.get("dom_selector"),
+                 "associated_task_ids": c.get("associated_task_ids", [])} for c in rep.get("components", [])]
     user = (
+        f"PAGE PURPOSE: {rep.get('page_purpose', '')}\n\n"
+        f"TASKS:\n{json.dumps(tasks)}\n\n"
         "EXISTING components (summary, do not repeat these):\n"
         f"{json.dumps(existing)}\n\n"
         "NEW elements that just appeared:\n"

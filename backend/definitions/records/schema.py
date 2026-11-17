@@ -12,9 +12,17 @@ class ScreenshotRecord(BaseModel):
 
     # the interface's record id, from the widget the generate route returned
     record_id: str
-    # when it was taken, such as "applied" or "updated"
+    # when it was taken: "applied", "updated", "saved" or "final"
     reason: str = "applied"
     image: str
+
+
+class StepsRecord(BaseModel):
+    """Body of POST /records/steps: a picture of every step of an interface that shows one step at a
+    time, in order, as PNG data URLs."""
+
+    record_id: str
+    images: list[str]
 
 
 class ErrorRecord(BaseModel):
